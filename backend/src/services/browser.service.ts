@@ -9,7 +9,7 @@ export class BrowserService {
         if (!this.browser) {
             this.browser = await chromium.launch({
                 headless: true,
-                executablePath: '/usr/bin/chromium',
+                executablePath: '/snap/bin/chromium',
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
