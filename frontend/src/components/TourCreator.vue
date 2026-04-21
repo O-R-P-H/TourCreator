@@ -63,16 +63,11 @@ const currentStatus = ref<TourStatus | null>(null);
 const tourUrl = ref('');
 
 let eventSource: EventSource | null = null;
-let pollInterval: NodeJS.Timeout | null = null;
+let pollInterval: ReturnType<typeof setInterval> | null = null;
 
 onMounted(() => {
   sessionId.value = localStorage.getItem('sessionId') || '';
 });
-
-const logout = () => {
-  localStorage.clear();
-  window.location.href = '/login';
-};
 
 const startPolling = () => {
   logs.value.push('🔄 Переключение на режим опроса...');
