@@ -63,43 +63,50 @@ const handleSubmit = async () => {
 
 <style scoped>
 .login-form {
-  max-width: 400px;
-  margin: 50px auto;
-  padding: 30px;
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  padding: 40px;
+  background: #1e1e1e;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  border: 1px solid #333;
 }
 
 h2 {
-  margin-bottom: 20px;
-  color: #333;
+  margin-bottom: 24px;
+  color: #ffffff;
   text-align: center;
+  font-size: 24px;
 }
 
 .form-group {
-  margin-bottom: 15px;
+  margin-bottom: 20px;
 }
 
 label {
   display: block;
-  margin-bottom: 5px;
-  color: #666;
+  margin-bottom: 8px;
+  color: #aaa;
   font-size: 14px;
 }
 
 input {
   width: 100%;
-  padding: 10px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  padding: 12px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
   font-size: 14px;
+  color: #fff;
   box-sizing: border-box;
+  transition: border-color 0.3s;
 }
 
 input:focus {
   outline: none;
   border-color: #4CAF50;
+}
+
+input::placeholder {
+  color: #666;
 }
 
 button {
@@ -108,10 +115,12 @@ button {
   background: #4CAF50;
   color: white;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   font-size: 16px;
+  font-weight: 600;
   cursor: pointer;
   transition: background 0.3s;
+  margin-top: 10px;
 }
 
 button:hover:not(:disabled) {
@@ -119,17 +128,18 @@ button:hover:not(:disabled) {
 }
 
 button:disabled {
-  background: #ccc;
+  background: #444;
   cursor: not-allowed;
 }
 
 .error {
-  margin-top: 15px;
-  padding: 10px;
-  background: #ffebee;
-  color: #c62828;
-  border-radius: 4px;
+  margin-top: 16px;
+  padding: 12px;
+  background: #3a1a1a;
+  color: #ff6b6b;
+  border-radius: 6px;
   font-size: 14px;
   text-align: center;
+  border: 1px solid #ff4444;
 }
 </style>

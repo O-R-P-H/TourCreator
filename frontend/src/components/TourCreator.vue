@@ -1,13 +1,9 @@
 <template>
   <div class="tour-creator">
-    <div v-if="!isLoggedIn">
-      <LoginForm @login-success="handleLoginSuccess" />
-    </div>
-
-    <div v-else class="creator-form">
-      <div class="header">
-        <h2>Создание тура</h2>
-        <button @click="logout" class="logout-btn">Выйти</button>
+    <div class="creator-form">
+      <div class="form-header">
+        <h2>Параметры тура</h2>
+        <p>Заполните данные для создания тура</p>
       </div>
 
       <form @submit.prevent="handleCreateTour">
@@ -17,7 +13,7 @@
               id="tourName"
               v-model="tourName"
               type="text"
-              placeholder="Введите название тура"
+              placeholder="Например: Тур в Москву"
               required
               :disabled="isProcessing"
           />
@@ -29,14 +25,16 @@
               id="cityId"
               v-model.number="cityId"
               type="number"
-              placeholder="Введите ID города"
+              placeholder="1105"
               required
               :disabled="isProcessing"
           />
+          <small class="hint">По умолчанию: 1105 (Москва)</small>
         </div>
 
-        <button type="submit" :disabled="isProcessing || !tourName || !cityId">
-          {{ isProcessing ? 'Создание...' : 'Создать тур' }}
+        <button type="submit" :disabled="isProcessing || !tourName || !cityId" class="submit-btn">
+          <span v-if="!isProcessing">🚀 Создать тур</span>
+          <span v-else>⏳ Создание...</span>
         </button>
       </form>
 
@@ -51,13 +49,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue';
-import LoginForm from './LoginForm.vue';
+import { ref, onUnmounted, onMounted } from 'vue';
 import StatusLog from './StatusLog.vue';
 import ApiService from '../services/api.service';
-import type { LoginResponse, TourStatus } from '../types';
+import type { TourStatus } from '../types';
 
-const isLoggedIn = ref(false);
 const isProcessing = ref(false);
 const sessionId = ref('');
 const tourName = ref('');
@@ -65,40 +61,17 @@ const cityId = ref<number>(1105);
 const logs = ref<string[]>([]);
 const currentStatus = ref<TourStatus | null>(null);
 const tourUrl = ref('');
-const xsrfToken = ref('');
-const userEmail = ref('');
-const userPassword = ref('');
 
 let eventSource: EventSource | null = null;
 let pollInterval: NodeJS.Timeout | null = null;
 
-const handleLoginSuccess = (data: LoginResponse, email: string, password: string) => {
-  sessionId.value = data.sessionId;
-  xsrfToken.value = data.xsrfToken;
-  userEmail.value = email;
-  userPassword.value = password;
-  isLoggedIn.value = true;
-  logs.value = [`✅ Успешный вход. Session ID: ${data.sessionId}`];
-};
+onMounted(() => {
+  sessionId.value = localStorage.getItem('sessionId') || '';
+});
 
 const logout = () => {
-  if (eventSource) {
-    eventSource.close();
-    eventSource = null;
-  }
-  if (pollInterval) {
-    clearInterval(pollInterval);
-    pollInterval = null;
-  }
-  isLoggedIn.value = false;
-  isProcessing.value = false;
-  sessionId.value = '';
-  xsrfToken.value = '';
-  userEmail.value = '';
-  userPassword.value = '';
-  logs.value = [];
-  currentStatus.value = null;
-  tourUrl.value = '';
+  localStorage.clear();
+  window.location.href = '/login';
 };
 
 const startPolling = () => {
@@ -150,7 +123,10 @@ const handleCreateTour = async () => {
   tourUrl.value = '';
 
   try {
-    if (!userEmail.value || !userPassword.value) {
+    const userEmail = localStorage.getItem('userEmail') || '';
+    const userPassword = localStorage.getItem('userPassword') || '';
+
+    if (!userEmail || !userPassword) {
       throw new Error('Данные для входа не найдены');
     }
 
@@ -158,8 +134,8 @@ const handleCreateTour = async () => {
       sessionId: sessionId.value,
       tourName: tourName.value,
       cityId: cityId.value,
-      email: userEmail.value,
-      password: userPassword.value
+      email: userEmail,
+      password: userPassword
     });
 
     logs.value.push('🚀 Процесс создания тура запущен');
@@ -235,62 +211,55 @@ onUnmounted(() => {
 
 <style scoped>
 .tour-creator {
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
-  padding: 20px;
 }
 
 .creator-form {
-  background: white;
-  border-radius: 8px;
-  padding: 30px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  background: #1e1e1e;
+  border-radius: 12px;
+  padding: 40px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  border: 1px solid #333;
 }
 
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
+.form-header {
+  margin-bottom: 30px;
 }
 
-h2 {
-  color: #333;
-  margin: 0;
+.form-header h2 {
+  color: #ffffff;
+  font-size: 24px;
+  margin-bottom: 8px;
 }
 
-.logout-btn {
-  padding: 8px 16px;
-  background: #f44336;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
+.form-header p {
+  color: #888;
   font-size: 14px;
 }
 
-.logout-btn:hover {
-  background: #d32f2f;
-}
-
 .form-group {
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 label {
   display: block;
-  margin-bottom: 5px;
-  color: #666;
+  margin-bottom: 8px;
+  color: #aaa;
   font-size: 14px;
+  font-weight: 500;
 }
 
 input {
   width: 100%;
-  padding: 10px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  padding: 12px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
   font-size: 14px;
+  color: #fff;
   box-sizing: border-box;
+  transition: border-color 0.3s;
 }
 
 input:focus {
@@ -298,24 +267,44 @@ input:focus {
   border-color: #4CAF50;
 }
 
-button[type="submit"] {
+input::placeholder {
+  color: #666;
+}
+
+input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.hint {
+  display: block;
+  margin-top: 6px;
+  color: #666;
+  font-size: 12px;
+}
+
+.submit-btn {
   width: 100%;
-  padding: 12px;
-  background: #4CAF50;
+  padding: 14px;
+  background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
   color: white;
   border: none;
-  border-radius: 4px;
+  border-radius: 6px;
   font-size: 16px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.3s;
+  transition: all 0.3s;
+  margin-bottom: 30px;
 }
 
-button[type="submit"]:hover:not(:disabled) {
-  background: #45a049;
+.submit-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3);
 }
 
-button[type="submit"]:disabled {
-  background: #ccc;
+.submit-btn:disabled {
+  background: #444;
   cursor: not-allowed;
+  transform: none;
 }
 </style>
