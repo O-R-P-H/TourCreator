@@ -111,11 +111,13 @@ const logout = () => {
 }
 
 .actions-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 30px;
 }
 
+/* Сохраняем исходные размеры карточек как на десктопе */
 .action-card {
   background: #1e1e1e;
   border: 1px solid #333;
@@ -124,6 +126,10 @@ const logout = () => {
   cursor: pointer;
   transition: all 0.3s;
   position: relative;
+  /* Фиксированная ширина как на ПК, для мобилки переопределим */
+  width: 300px;
+  min-width: 280px;
+  flex: 0 0 auto;
 }
 
 .action-card:hover {
@@ -159,9 +165,100 @@ const logout = () => {
   border-radius: 20px;
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .card-badge.soon {
   background: #ff9800;
+}
+
+/* ---------- АДАПТИВ ПОД МОБИЛЬНЫЕ УСТРОЙСТВА ---------- */
+@media (max-width: 768px) {
+  .header {
+    padding: 16px 20px;
+  }
+
+  .header h1 {
+    font-size: 20px;
+  }
+
+  .logout-btn {
+    padding: 6px 16px;
+    font-size: 13px;
+  }
+
+  .main {
+    padding: 40px 20px;
+  }
+
+  .welcome-section {
+    margin-bottom: 32px;
+  }
+
+  .welcome-section h2 {
+    font-size: 26px;
+  }
+
+  .welcome-section p {
+    font-size: 15px;
+  }
+
+  .actions-grid {
+    gap: 20px;
+    /* На мобилке разрешаем элементам растягиваться на всю ширину */
+  }
+
+  .action-card {
+    /* Переопределяем ширину: на мобилке карточка занимает всю доступную ширину */
+    width: 100%;
+    max-width: 400px; /* чтобы на больших телефонах не было слишком широко */
+    margin: 0 auto;   /* центрируем если блок один в строке */
+    padding: 24px 20px;
+  }
+
+  /* Сохраняем позиционирование бейджика */
+  .card-badge {
+    top: 16px;
+    right: 16px;
+  }
+
+  /* Корректируем размер иконки и текста для лучшей читаемости на маленьких экранах */
+  .card-icon {
+    font-size: 42px;
+    margin-bottom: 16px;
+  }
+
+  .action-card h3 {
+    font-size: 18px;
+    margin-bottom: 8px;
+    padding-right: 80px; /* Чтобы текст не залезал под бейдж "Рекомендуется" */
+  }
+
+  .action-card p {
+    font-size: 14px;
+  }
+}
+
+/* Для очень маленьких экранов (iPhone SE и подобные) */
+@media (max-width: 480px) {
+  .header {
+    padding: 12px 16px;
+  }
+
+  .main {
+    padding: 30px 16px;
+  }
+
+  .welcome-section h2 {
+    font-size: 22px;
+  }
+
+  .action-card {
+    padding: 20px 16px;
+  }
+
+  .card-icon {
+    font-size: 36px;
+  }
 }
 </style>
