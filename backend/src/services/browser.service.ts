@@ -9,16 +9,14 @@ export class BrowserService {
         if (!this.browser) {
             this.browser = await chromium.launch({
                 headless: true,
+                executablePath: '/usr/bin/chromium',
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--single-process',
-                    '--disable-features=VizDisplayCompositor'
+                    '--disable-gpu'
                 ]
-            });
-        }
+            });        }
     }
 
     async createSession(sessionId: string): Promise<Page> {
