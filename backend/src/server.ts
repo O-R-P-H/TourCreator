@@ -10,7 +10,7 @@ const PORT = 3000;
 const allowedOrigins = [
     'http://localhost:5173',
     'http://localhost:5174',
-    'https://tour-creator.tsukawa.ru/' // Добавь свой домен
+    'https://tour-creator.tsukawa.ru' // Добавь свой домен
 ];
 
 app.use(cors({
