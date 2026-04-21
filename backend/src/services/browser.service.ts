@@ -8,8 +8,15 @@ export class BrowserService {
     async initialize(): Promise<void> {
         if (!this.browser) {
             this.browser = await chromium.launch({
-                headless: true, // На сервере лучше headless
-                slowMo: 50
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--single-process',
+                    '--disable-features=VizDisplayCompositor'
+                ]
             });
         }
     }
