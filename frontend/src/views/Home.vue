@@ -2,6 +2,7 @@
   <div class="home">
     <header class="header">
       <h1>🚀 Tour Creator</h1>
+      <p style="color: white;font-weight: lighter;font-size: 8px">made by Tsukawa</p>
       <button @click="logout" class="logout-btn">Выйти</button>
     </header>
 
