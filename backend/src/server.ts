@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import tourRoutes from "./routes/tour.routes";
+import migrateRoutes from "./routes/migrate.routes";
 
 
 const app = express();
@@ -38,6 +39,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/api', tourRoutes);
+app.use('/api/migrate', migrateRoutes);
 
 app.listen(PORT, () => {
     console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
