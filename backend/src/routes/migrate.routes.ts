@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
-import * as fs from 'fs';
 
 const router = Router();
 
@@ -15,6 +14,21 @@ interface MappedEntity {
     pazl_id: number | null;
     pazl_name: string | null;
     needs_creation: boolean;
+}
+
+interface CreatedEntity {
+    type: string;
+    source_name: string;
+    pazl_id: number;
+    original_data?: any;
+}
+
+// Типы для page.evaluate
+interface FetchApiParams {
+    fetchUrl: string;
+    fetchMethod: string;
+    fetchBody?: any;
+    xsrfToken: string;
 }
 
 // ============================================
@@ -130,6 +144,125 @@ class AviannaApiClient {
 }
 
 // ============================================
+// ИЗВЛЕЧЕНИЕ ДАННЫХ ИЗ AVIANNA
+// ============================================
+
+async function extractTourData(api: AviannaApiClient, tourId: number): Promise<any> {
+    console.log(`\n  📥 Загрузка тура ID: ${tourId}`);
+    const tour = await api.getTour(tourId);
+
+    if (!tour) {
+        console.log('  ❌ Не удалось загрузить тур');
+        return null;
+    }
+
+    console.log(`  ✅ Тур: ${tour.name}`);
+
+    const result: any = {
+        id: tour.id,
+        name: tour.name,
+        slug: tour.slug,
+        duration: tour.duration,
+        is_active: tour.is_active,
+        adult_price: tour.adult_price,
+        child_price: tour.child_price,
+        commission_agency_sum: tour.commission_agency_sum,
+        short_description: tour.short_description,
+        description: tour.description,
+        info: tour.info,
+        additional_price: tour.additional_price,
+        additional_price_includes: tour.additional_price_includes,
+        additional_extra_price: tour.additional_extra_price,
+        seo_h1: tour.seo_h1,
+        seo_title: tour.seo_title,
+        seo_description: tour.seo_description,
+        dates: tour.dates,
+        days: tour.days,
+        meals: tour.meals,
+        photos: tour.photos,
+        files: tour.files,
+        category_id: tour.category_id,
+        tour_type_id: tour.tour_type_id,
+        city_id: tour.city_id,
+        transport_forth_id: tour.transport_forth_id,
+        transport_back_id: tour.transport_back_id,
+        trade_offers: tour.trade_offers,
+        catalog_sections: tour.catalog_sections || [],
+        services: tour.services || [],
+        required_services: tour.required_services || [],
+        additional_services: tour.additional_services || [],
+    };
+
+    if (tour.transport_forth_id) {
+        console.log(`\n  🚌 Загрузка транспорта ID: ${tour.transport_forth_id}`);
+        const transport = await api.getTransport(tour.transport_forth_id);
+        if (transport) {
+            result.transport_forth = transport;
+            console.log(`    ✅ ${transport.name}`);
+
+            if (transport.transportation_id) {
+                const transportation = await api.getTransportation();
+                if (transportation?.data) {
+                    const transportType = transportation.data.find((t: any) => t.id === transport.transportation_id);
+                    if (transportType) {
+                        result.transport_forth.transportation = transportType;
+                    }
+                }
+            }
+        }
+    }
+
+    if (tour.transport_back_id) {
+        console.log(`\n  🚌 Загрузка обратного транспорта ID: ${tour.transport_back_id}`);
+        const transport = await api.getTransport(tour.transport_back_id);
+        if (transport) {
+            result.transport_back = transport;
+            console.log(`    ✅ ${transport.name}`);
+        }
+    }
+
+    if (tour.hotels && tour.hotels.length > 0) {
+        console.log(`\n  🏨 Загрузка гостиниц (${tour.hotels.length})`);
+        result.hotels = [];
+
+        for (const hotelRef of tour.hotels) {
+            console.log(`    Загрузка гостиницы ID: ${hotelRef.id}`);
+            const hotel = await api.getHotel(hotelRef.id);
+
+            if (hotel) {
+                result.hotels.push({
+                    ...hotel,
+                    arrival_day: hotelRef.arrival_day,
+                    departure_day: hotelRef.departure_day,
+                    meal_id: hotelRef.meal_id,
+                });
+                console.log(`      ✅ ${hotel.name} (${hotel.rooms?.length || 0} номеров)`);
+            }
+        }
+    }
+
+    const serviceIds = new Set<number>();
+    [...(tour.services || []), ...(tour.required_services || []), ...(tour.additional_services || [])].forEach((s: any) => {
+        if (s.id) serviceIds.add(s.id);
+    });
+
+    if (serviceIds.size > 0) {
+        console.log(`\n  🛠️ Загрузка информации об услугах (${serviceIds.size})`);
+        result.services_data = {};
+
+        for (const serviceId of serviceIds) {
+            const serviceData = await api.getTourServiceFull(serviceId);
+            if (serviceData) {
+                result.services_data[serviceId] = serviceData;
+                console.log(`    ✅ Услуга ID ${serviceId}: ${serviceData.name || 'без названия'}`);
+            }
+        }
+    }
+
+    return result;
+}
+
+// ============================================
 // API КЛИЕНТ PAZL TOURS
 // ============================================
 
@@ -152,28 +285,28 @@ class PazlApiClient {
         const method = options?.method || 'GET';
 
         try {
-            const result = await this.page.evaluate(async ({ fetchUrl, fetchMethod, fetchBody, xsrfToken }: any) => {
+            const result = await this.page.evaluate(async (params: FetchApiParams) => {
                 const headers: Record<string, string> = {
                     'Accept': 'application/json',
                     'X-Requested-With': 'XMLHttpRequest',
-                    'X-XSRF-TOKEN': xsrfToken
+                    'X-XSRF-TOKEN': params.xsrfToken
                 };
 
-                if (fetchMethod !== 'GET') {
+                if (params.fetchMethod !== 'GET') {
                     headers['Content-Type'] = 'application/json';
                 }
 
                 const fetchOptions: RequestInit = {
-                    method: fetchMethod,
+                    method: params.fetchMethod,
                     headers: headers,
                     credentials: 'include'
                 };
 
-                if (fetchMethod !== 'GET' && fetchBody) {
-                    fetchOptions.body = JSON.stringify(fetchBody);
+                if (params.fetchMethod !== 'GET' && params.fetchBody) {
+                    fetchOptions.body = JSON.stringify(params.fetchBody);
                 }
 
-                const response = await fetch(fetchUrl, fetchOptions);
+                const response = await fetch(params.fetchUrl, fetchOptions);
 
                 if (!response.ok) {
                     const errorText = await response.text();
@@ -200,7 +333,7 @@ class PazlApiClient {
                 fetchMethod: method,
                 fetchBody: options?.body,
                 xsrfToken: this.xsrfToken
-            });
+            } as FetchApiParams);
 
             if (result?.__error) {
                 console.log(`      ❌ API Error ${result.__status}: ${result.__body}`);
@@ -301,126 +434,496 @@ class PazlApiClient {
     async findCatalogSection(name: string): Promise<{ id: number; name: string } | null> {
         return this.findEntity('/catalog-sections', name);
     }
-}
 
-// ============================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-// ============================================
-
-async function extractTourData(api: AviannaApiClient, tourId: number): Promise<any> {
-    console.log(`\n  📥 Загрузка тура ID: ${tourId}`);
-    const tour = await api.getTour(tourId);
-
-    if (!tour) {
-        console.log('  ❌ Не удалось загрузить тур');
-        return null;
+    async createCity(name: string): Promise<any> {
+        const body = {
+            name: name,
+            country_id: 1,
+            near_cities: [],
+            railway_transfer_cities: [],
+            aviation_transfer_cities: [],
+            seo_settings: {
+                meta: {},
+                hotel: {
+                    meta: {},
+                    description: null,
+                    bottom_block: { text: null },
+                    faq: []
+                },
+                bus_tickets: {
+                    meta: {},
+                    description: null,
+                    bottom_block: { text: null },
+                    faq: [],
+                    advantages: []
+                }
+            },
+            catalog: {}
+        };
+        return this.apiRequest('/cities', { method: 'POST', body });
     }
 
-    console.log(`  ✅ Тур: ${tour.name}`);
+    async createTransportation(name: string): Promise<any> {
+        const body = {
+            columns_at_door: 2,
+            rear_seats: 4,
+            kind: 1,
+            name: name,
+            seats: 35,
+            rows: 4,
+            second_door: true,
+            second_door_rows: 3,
+            second_door_length: 12
+        };
+        return this.apiRequest('/transportation', { method: 'POST', body });
+    }
 
-    const result: any = {
-        id: tour.id,
-        name: tour.name,
-        slug: tour.slug,
-        duration: tour.duration,
-        is_active: tour.is_active,
-        adult_price: tour.adult_price,
-        child_price: tour.child_price,
-        commission_agency_sum: tour.commission_agency_sum,
-        short_description: tour.short_description,
-        description: tour.description,
-        info: tour.info,
-        additional_price: tour.additional_price,
-        additional_price_includes: tour.additional_price_includes,
-        additional_extra_price: tour.additional_extra_price,
-        seo_h1: tour.seo_h1,
-        seo_title: tour.seo_title,
-        seo_description: tour.seo_description,
-        dates: tour.dates,
-        days: tour.days,
-        meals: tour.meals,
-        photos: tour.photos,
-        files: tour.files,
-        category_id: tour.category_id,
-        tour_type_id: tour.tour_type_id,
-        city_id: tour.city_id,
-        transport_forth_id: tour.transport_forth_id,
-        transport_back_id: tour.transport_back_id,
-        trade_offers: tour.trade_offers,
-        catalog_sections: tour.catalog_sections || [],
-        services: tour.services || [],
-        required_services: tour.required_services || [],
-        additional_services: tour.additional_services || [],
-    };
+    async createTransport(transportationId: number, name: string, data: any, citiesMap: Map<number, number>): Promise<any> {
+        const routes: any = {
+            start: {
+                info: data.transport_forth?.routes?.start?.info || null,
+                point_city_id: data.transport_forth?.routes?.start?.point_city_id
+                    ? citiesMap.get(data.transport_forth.routes.start.point_city_id) || data.transport_forth.routes.start.point_city_id
+                    : null,
+                start_time: data.transport_forth?.routes?.start?.start_time || '10:00',
+                finish_time: null
+            },
+            intermediates: [],
+            finish: {
+                info: data.transport_forth?.routes?.finish?.info || null,
+                point_city_id: data.transport_forth?.routes?.finish?.point_city_id
+                    ? citiesMap.get(data.transport_forth.routes.finish.point_city_id) || data.transport_forth.routes.finish.point_city_id
+                    : null,
+                start_time: null,
+                finish_time: data.transport_forth?.routes?.finish?.finish_time || '11:00'
+            }
+        };
 
-    if (tour.transport_forth_id) {
-        console.log(`  🚌 Загрузка транспорта ID: ${tour.transport_forth_id}`);
-        const transport = await api.getTransport(tour.transport_forth_id);
-        if (transport) {
-            result.transport_forth = transport;
-            console.log(`    ✅ ${transport.name}`);
+        if (data.transport_forth?.routes?.intermediates) {
+            for (const point of data.transport_forth.routes.intermediates) {
+                const pcid = citiesMap.get(point.point_city_id) || point.point_city_id;
+                routes.intermediates.push({
+                    point_city_id: pcid,
+                    info: point.info || null,
+                    finish_time: point.finish_time || '',
+                    start_time: point.start_time || '',
+                    arrival_day: point.arrival_day || 1,
+                    departure_day: point.departure_day || 1,
+                    tariffs: [],
+                    can_delete: true
+                });
+            }
+        }
 
-            if (transport.transportation_id) {
-                const transportation = await api.getTransportation();
-                if (transportation?.data) {
-                    const transportType = transportation.data.find((t: any) => t.id === transport.transportation_id);
-                    if (transportType) {
-                        result.transport_forth.transportation = transportType;
-                    }
+        const allCityIds = new Set<number>();
+        if (routes.start.point_city_id) allCityIds.add(routes.start.point_city_id);
+        if (routes.finish.point_city_id) allCityIds.add(routes.finish.point_city_id);
+        routes.intermediates.forEach((p: any) => {
+            if (p.point_city_id) allCityIds.add(p.point_city_id);
+        });
+
+        const cityArray = Array.from(allCityIds);
+        const tariffs: any[] = [];
+        for (const fromCity of cityArray) {
+            for (const toCity of cityArray) {
+                tariffs.push({
+                    from_city_id: fromCity,
+                    to_city_id: toCity,
+                    tariff: 0
+                });
+            }
+        }
+
+        const dates = data.transport_forth?.dates?.map((d: any) => d.start_date) || [];
+
+        const payload = {
+            transportation_id: transportationId,
+            vendor_id: 2,
+            name: name,
+            duration: data.transport_forth?.duration?.toString() || "1",
+            adult_price: data.transport_forth?.adult_price || "0",
+            child_price: data.transport_forth?.child_price || "0",
+            start_date: data.transport_forth?.start_date || dates[0] || "2026-01-01",
+            finish_date: data.transport_forth?.finish_date || dates[dates.length - 1] || "2026-12-31",
+            departure_type: data.transport_forth?.departure_type || 1,
+            is_excursion: true,
+            application_auto_confirm: false,
+            auto_confirm_status: null,
+            days: [],
+            dates: dates.map((d: string) => ({
+                id: null,
+                start_date: d,
+                commission_type: 1,
+                commission_sum: 0,
+                freight: 0
+            })),
+            routes: routes,
+            tariffs: tariffs,
+            catalog: {
+                title: null,
+                price: 0,
+                image: null,
+                sort: 0,
+                seo_settings: {
+                    meta: { h1: null, title: null, description: null },
+                    advantages: [],
+                    faq: [],
+                    top_block: { title: null, text: null },
+                    bottom_block: { title: null, text: null }
+                }
+            }
+        };
+
+        return this.apiRequest('/transports', { method: 'POST', body: { payload: JSON.stringify(payload) } });
+    }
+
+    async createTourCategory(name: string): Promise<any> {
+        return this.apiRequest('/tours/excursion/categories', { method: 'POST', body: { name } });
+    }
+
+    async createHotelMeal(name: string): Promise<any> {
+        return this.apiRequest('/hotels/meals', { method: 'POST', body: { id: null, name, category_type: 1 } });
+    }
+
+    async createHotelAccommodation(name: string): Promise<any> {
+        return this.apiRequest('/hotels/accommodations', { method: 'POST', body: { name } });
+    }
+
+    async createHotelInfrastructureType(name: string): Promise<any> {
+        return this.apiRequest('/hotels/infrastructure-types', { method: 'POST', body: { name } });
+    }
+
+    async createHotelInfrastructure(name: string, typeId: number): Promise<any> {
+        return this.apiRequest('/hotels/infrastructures', {
+            method: 'POST',
+            body: { is_filter: true, is_point_filter: false, name, infrastructure_type_id: typeId }
+        });
+    }
+
+    async createRoomType(name: string): Promise<any> {
+        return this.apiRequest('/hotels/rooms/types', { method: 'POST', body: { name } });
+    }
+
+    async createRoomPlace(name: string): Promise<any> {
+        return this.apiRequest('/hotels/rooms/places', {
+            method: 'POST',
+            body: { name, places_count: "2", adv_places_count: "0" }
+        });
+    }
+
+    async createRoomDescription(name: string): Promise<any> {
+        return this.apiRequest('/hotels/rooms/descriptions', { method: 'POST', body: { name } });
+    }
+
+    async createRoomService(name: string): Promise<any> {
+        return this.apiRequest('/hotels/rooms/services', { method: 'POST', body: { name } });
+    }
+
+    async createRoomEquipment(name: string): Promise<any> {
+        return this.apiRequest('/hotels/rooms/equipment', { method: 'POST', body: { name } });
+    }
+
+    async createRoomFurniture(name: string): Promise<any> {
+        return this.apiRequest('/hotels/rooms/furniture', { method: 'POST', body: { name } });
+    }
+
+    async createRoomBathroom(name: string): Promise<any> {
+        return this.apiRequest('/hotels/rooms/bathroom', { method: 'POST', body: { name } });
+    }
+
+    async createTourService(name: string, serviceClass: string = 'group', dates: any[] = []): Promise<any> {
+        const serviceDates = dates.length > 0 ? dates : [{
+            id: null,
+            from: "2026-01-01",
+            to: "2026-12-31",
+            vendor_price: "0",
+            adult_price: "0",
+            child_prices: [],
+            commission_adult_type: 1,
+            commission_adult_sum: 0,
+            commission_child_type: 1,
+            commission_child_sum: 0
+        }];
+
+        return this.apiRequest('/tours/services', {
+            method: 'POST',
+            body: {
+                name,
+                class: serviceClass,
+                vendor_id: 2,
+                is_dealer_vendor: false,
+                description: name,
+                dates: serviceDates
+            }
+        });
+    }
+
+    async createHotel(hotelName: string, hotelData: any, mappings: any): Promise<any> {
+        let cityId = null;
+
+        const cityMapping = mappings.cities.find((c: MappedEntity) => c.source_id === hotelData.city?.id);
+        if (cityMapping && !cityMapping.needs_creation) {
+            cityId = cityMapping.pazl_id;
+        }
+
+        if (!cityId && hotelData.city?.name) {
+            const foundCity = await this.findCity(hotelData.city.name);
+            if (foundCity) {
+                cityId = foundCity.id;
+            }
+        }
+
+        if (!cityId && hotelData.city?.name) {
+            console.log(`      🏙️ Город "${hotelData.city.name}" не найден, создаём...`);
+            const createResult = await this.createCity(hotelData.city.name);
+            if (createResult) {
+                const newCity = await this.findCity(hotelData.city.name);
+                if (newCity) {
+                    cityId = newCity.id;
+                    console.log(`      ✅ Город "${hotelData.city.name}" создан (ID: ${newCity.id})`);
                 }
             }
         }
-    }
 
-    if (tour.transport_back_id) {
-        console.log(`  🚌 Загрузка обратного транспорта ID: ${tour.transport_back_id}`);
-        const transport = await api.getTransport(tour.transport_back_id);
-        if (transport) {
-            result.transport_back = transport;
-            console.log(`    ✅ ${transport.name}`);
+        if (!cityId) {
+            console.log(`      ⚠️ Не удалось определить город для гостиницы "${hotelName}"`);
+            return null;
         }
-    }
 
-    if (tour.hotels && tour.hotels.length > 0) {
-        console.log(`  🏨 Загрузка гостиниц (${tour.hotels.length})`);
-        result.hotels = [];
+        const meals: any[] = [];
+        if (hotelData.meals) {
+            for (const meal of hotelData.meals) {
+                const mealMapping = mappings.hotel_meals.find((m: MappedEntity) => m.source_id === meal.id);
+                if (mealMapping && !mealMapping.needs_creation) {
+                    meals.push({ id: mealMapping.pazl_id, sum: meal.sum || "0" });
+                }
+            }
+        }
 
-        for (const hotelRef of tour.hotels) {
-            console.log(`    Загрузка гостиницы ID: ${hotelRef.id}`);
-            const hotel = await api.getHotel(hotelRef.id);
+        const infrastructures: any[] = [];
+        if (hotelData.infrastructures && hotelData.infrastructures.length > 0) {
+            for (const infra of hotelData.infrastructures) {
+                let infraId = null;
+                let typeId = null;
 
-            if (hotel) {
-                result.hotels.push({
-                    ...hotel,
-                    arrival_day: hotelRef.arrival_day,
-                    departure_day: hotelRef.departure_day,
-                    meal_id: hotelRef.meal_id,
+                const infraMapping = mappings.hotel_infrastructures.find(
+                    (i: MappedEntity) => i.source_id === infra.id
+                );
+                if (infraMapping && !infraMapping.needs_creation) {
+                    infraId = infraMapping.pazl_id;
+                }
+
+                if (infra.infrastructure_type?.id) {
+                    const typeMapping = mappings.hotel_infrastructure_types.find(
+                        (t: MappedEntity) => t.source_id === infra.infrastructure_type.id
+                    );
+                    if (typeMapping && !typeMapping.needs_creation) {
+                        typeId = typeMapping.pazl_id;
+                    }
+                }
+                if (!typeId && infra.infrastructure_type_id) {
+                    const typeMapping = mappings.hotel_infrastructure_types.find(
+                        (t: MappedEntity) => t.source_id === infra.infrastructure_type_id
+                    );
+                    if (typeMapping && !typeMapping.needs_creation) {
+                        typeId = typeMapping.pazl_id;
+                    }
+                }
+
+                if (infraId && typeId) {
+                    infrastructures.push({
+                        id: infraId,
+                        pay: infra.pay || 0,
+                        type: typeId
+                    });
+                    console.log(`      ✅ Инфраструктура: ${infra.name} (ID: ${infraId}, тип: ${typeId})`);
+                }
+            }
+        }
+
+        if (infrastructures.length === 0) {
+            console.log(`      ⚠️ Гостиница без инфраструктур, создаём базовую...`);
+
+            let typeId = 1;
+            let typeFound = await this.findHotelInfrastructureType('Удобства');
+            if (!typeFound) {
+                await this.createHotelInfrastructureType('Удобства');
+                typeFound = await this.findHotelInfrastructureType('Удобства');
+            }
+            if (typeFound) {
+                typeId = typeFound.id;
+            }
+
+            let infraFound = await this.findHotelInfrastructure('Огороженная территория');
+            if (!infraFound) {
+                await this.createHotelInfrastructure('Огороженная территория', typeId);
+                infraFound = await this.findHotelInfrastructure('Огороженная территория');
+            }
+            if (infraFound) {
+                infrastructures.push({
+                    id: infraFound.id,
+                    pay: 0,
+                    type: typeId
                 });
-                console.log(`      ✅ ${hotel.name} (${hotel.rooms?.length || 0} номеров)`);
             }
         }
-    }
 
-    const serviceIds = new Set<number>();
-    [...(tour.services || []), ...(tour.required_services || []), ...(tour.additional_services || [])].forEach((s: any) => {
-        if (s.id) serviceIds.add(s.id);
-    });
+        const rooms: any[] = [];
+        if (hotelData.rooms) {
+            for (const room of hotelData.rooms) {
+                const accommodationMapping = mappings.hotel_accommodations.find(
+                    (a: MappedEntity) => a.source_id === room.accommodation?.id
+                );
+                const typeMapping = mappings.room_types.find((t: MappedEntity) => t.source_id === room.type?.id);
+                const placeMapping = mappings.room_places.find((p: MappedEntity) => p.source_id === room.place?.id);
+                const descriptionMapping = mappings.room_descriptions.find(
+                    (d: MappedEntity) => d.source_id === room.description?.id
+                );
 
-    if (serviceIds.size > 0) {
-        console.log(`  🛠️ Загрузка информации об услугах (${serviceIds.size})`);
-        result.services_data = {};
+                if (accommodationMapping && typeMapping && placeMapping && descriptionMapping &&
+                    !accommodationMapping.needs_creation && !typeMapping.needs_creation &&
+                    !placeMapping.needs_creation && !descriptionMapping.needs_creation) {
 
-        for (const serviceId of serviceIds) {
-            const serviceData = await api.getTourServiceFull(serviceId);
-            if (serviceData) {
-                result.services_data[serviceId] = serviceData;
-                console.log(`    ✅ Услуга ID ${serviceId}: ${serviceData.name || 'без названия'}`);
+                    const roomMeals: any[] = [];
+                    if (room.meals) {
+                        for (const meal of room.meals) {
+                            const mealMapping = mappings.hotel_meals.find((m: MappedEntity) => m.source_id === meal.id);
+                            if (mealMapping && !mealMapping.needs_creation) {
+                                roomMeals.push(mealMapping.pazl_id);
+                            }
+                        }
+                    }
+
+                    rooms.push({
+                        accommodation_id: accommodationMapping.pazl_id,
+                        type_id: typeMapping.pazl_id,
+                        place_id: placeMapping.pazl_id,
+                        quota: room.quota || false,
+                        quota_count: room.quota_count || null,
+                        adult_count: room.adult_count?.toString() || "0",
+                        child_count: room.child_count?.toString() || "0",
+                        adult_price: room.adult_price || "",
+                        child_price: room.child_price || "",
+                        child_without: room.child_without || false,
+                        is_children_in_adult_places: room.is_children_in_adult_places || true,
+                        is_children_in_adv_adult_places: room.is_children_in_adv_adult_places || false,
+                        child_without_price: room.child_without_price || "",
+                        adv_adult_count: room.adv_adult_count?.toString() || "0",
+                        adv_child_count: room.adv_child_count?.toString() || "0",
+                        adv_adult_price: room.adv_adult_price || "",
+                        adv_child_price: room.adv_child_price || "",
+                        photos: [],
+                        name: room.name || "",
+                        meals: roomMeals,
+                        premises: [],
+                        area: room.area || null,
+                        dates: room.dates?.map((d: any) => ({
+                            id: null,
+                            from: d.from || "2026-01-01",
+                            to: d.to || "2026-12-31",
+                            is_total_price: d.is_total_price || true,
+                            total_price: d.total_price?.toString() || "0",
+                            adult_price: d.adult_price || "0",
+                            child_price: d.child_price || "0",
+                            child_without_price: d.child_without_price || "0",
+                            adv_adult_price: d.adv_adult_price || "0",
+                            adv_child_price: d.adv_child_price || "0",
+                            commission_general_sum: d.commission_general_sum?.toString() || "0",
+                            is_differentiate: d.is_differentiate || true,
+                            commission_adult_type: d.commission_adult_type || 1,
+                            commission_adult_sum: d.commission_adult_sum || 0,
+                            commission_child_type: d.commission_child_type || 1,
+                            commission_child_sum: d.commission_child_sum || 0,
+                            commission_adv_adult_type: d.commission_adv_adult_type || 1,
+                            commission_adv_adult_sum: d.commission_adv_adult_sum || 0,
+                            commission_adv_child_type: d.commission_adv_child_type || 1,
+                            commission_adv_child_sum: d.commission_adv_child_sum || 0,
+                            commission_child_without_place_type: d.commission_child_without_place_type || 1,
+                            commission_child_without_place_sum: d.commission_child_without_place_sum || 0
+                        })) || [],
+                        description_id: descriptionMapping.pazl_id,
+                        place: {
+                            id: placeMapping.pazl_id,
+                            name: placeMapping.pazl_name,
+                            places_count: room.place?.places_count || 2,
+                            adv_places_count: room.place?.adv_places_count || 0
+                        },
+                        services: [],
+                        r_services: [],
+                        r_equipments: [],
+                        r_furnitures: [],
+                        r_bathrooms: [],
+                        children_ages: [],
+                        children_ages_without_place: [],
+                        adv_children_ages: [],
+                        in_adult_places_children_ages: [],
+                        in_adv_adult_places_children_ages: [],
+                        type: {
+                            id: typeMapping.pazl_id,
+                            name: typeMapping.pazl_name
+                        },
+                        description: {
+                            id: descriptionMapping.pazl_id,
+                            name: descriptionMapping.pazl_name
+                        }
+                    });
+                }
             }
         }
-    }
 
-    return result;
+        const payload = {
+            departure_time: hotelData.departure_time || "12:00",
+            promotion_id: null,
+            desc_files: [],
+            memo_files: [],
+            photos: [],
+            videos: [],
+            meals: meals,
+            commission_general_sum: hotelData.commission_general_sum?.toString() || "0",
+            is_differentiate: hotelData.is_differentiate || false,
+            commission_adult_type: hotelData.commission_adult_type || 1,
+            commission_adult_sum: hotelData.commission_adult_sum || 0,
+            commission_child_type: hotelData.commission_child_type || 1,
+            commission_child_sum: hotelData.commission_child_sum || 0,
+            commission_adv_adult_type: hotelData.commission_adv_adult_type || 1,
+            commission_adv_adult_sum: hotelData.commission_adv_adult_sum || 0,
+            commission_adv_child_type: hotelData.commission_adv_child_type || 1,
+            commission_adv_child_sum: hotelData.commission_adv_child_sum || 0,
+            commission_child_without_place_type: hotelData.commission_child_without_place_type || 1,
+            commission_child_without_place_sum: hotelData.commission_child_without_place_sum || 0,
+            commission_meal_type: hotelData.commission_meal_type || 1,
+            commission_meal_sum: hotelData.commission_meal_sum || 0,
+            vendor_id: hotelData.vendor_id || 2,
+            dealer_id: null,
+            description: hotelData.description || "",
+            info: hotelData.info || null,
+            is_excursion: hotelData.is_excursion || true,
+            catalog_sections: [],
+            catalog: { sort: 0, sum: 0 },
+            coords: null,
+            is_search_priority: hotelData.is_search_priority || false,
+            application_auto_confirm: hotelData.application_auto_confirm || false,
+            auto_confirm_status: null,
+            status: hotelData.status || 1,
+            stars: hotelData.stars || null,
+            rating: hotelData.rating || null,
+            city_id: cityId,
+            name: hotelName,
+            address: hotelData.address || "",
+            category_type: hotelData.category_type || 1,
+            arrival_time: hotelData.arrival_time || "12:00",
+            services: [],
+            infrastructures: infrastructures,
+            rooms: rooms
+        };
+
+        return this.apiRequest('/hotels', { method: 'POST', body: { payload: JSON.stringify(payload) } });
+    }
 }
+
+// ============================================
+// ВХОД В PAZL TOURS
+// ============================================
 
 async function loginToPazl(page: any, email: string, password: string): Promise<boolean> {
     console.log('\n  🔄 Вход в Pazl Tours...');
@@ -458,6 +961,10 @@ async function loginToPazl(page: any, email: string, password: string): Promise<
         return false;
     }
 }
+
+// ============================================
+// МАППИНГ
+// ============================================
 
 async function performMapping(
     aviannaApi: AviannaApiClient,
@@ -497,7 +1004,7 @@ async function performMapping(
         label: string,
         sourceType?: string
     ) => {
-        console.log(`    🔍 Поиск "${label}" в Pazl: "${sourceName}"...`);
+        console.log(`    🔍 "${label}" -> Pazl: "${sourceName}"`);
         const found = await pazlFindMethod(sourceName);
         targetArray.push({
             source_id: sourceId,
@@ -548,8 +1055,6 @@ async function performMapping(
                 }
             }
         }
-    } else {
-        console.log('\n  🏙️ Города: нет городов для маппинга');
     }
 
     // 2. Тип транспорта
@@ -630,7 +1135,6 @@ async function performMapping(
         for (const service of tourData.services) {
             const serviceId = service.id;
             if (!tourServicesToFind.has(serviceId)) {
-                console.log(`    🔍 Получение названия услуги ID: ${serviceId}...`);
                 const serviceName = await aviannaApi.getTourServiceName(serviceId);
                 if (serviceName) {
                     tourServicesToFind.set(serviceId, {
@@ -639,7 +1143,6 @@ async function performMapping(
                         day: service.day,
                         service_class: service.service_class
                     });
-                    console.log(`    ✅ ${serviceName}`);
                 }
             }
         }
@@ -649,7 +1152,6 @@ async function performMapping(
         for (const service of tourData.required_services) {
             const serviceId = service.id;
             if (!tourServicesToFind.has(serviceId)) {
-                console.log(`    🔍 Получение названия обязательной услуги ID: ${serviceId}...`);
                 const serviceName = await aviannaApi.getTourServiceName(serviceId);
                 if (serviceName) {
                     tourServicesToFind.set(serviceId, {
@@ -658,7 +1160,6 @@ async function performMapping(
                         day: service.day,
                         service_class: service.service_class
                     });
-                    console.log(`    ✅ ${serviceName}`);
                 }
             }
         }
@@ -668,7 +1169,6 @@ async function performMapping(
         for (const service of tourData.additional_services) {
             const serviceId = service.id;
             if (!tourServicesToFind.has(serviceId)) {
-                console.log(`    🔍 Получение названия дополнительной услуги ID: ${serviceId}...`);
                 const serviceName = await aviannaApi.getTourServiceName(serviceId);
                 if (serviceName) {
                     tourServicesToFind.set(serviceId, {
@@ -677,7 +1177,6 @@ async function performMapping(
                         day: service.day,
                         service_class: service.service_class
                     });
-                    console.log(`    ✅ ${serviceName}`);
                 }
             }
         }
@@ -746,45 +1245,37 @@ async function performMapping(
         });
     });
 
-    const hasHotelEntities = accommodationsMap.size > 0 || infraTypesMap.size > 0 ||
-        infrastructuresMap.size > 0 || roomTypesMap.size > 0 ||
-        roomPlacesMap.size > 0 || roomDescriptionsMap.size > 0 ||
-        roomServicesMap.size > 0 || roomEquipmentsMap.size > 0 ||
-        roomFurnituresMap.size > 0 || roomBathroomsMap.size > 0;
+    console.log('\n  🏨 Сущности гостиниц:');
 
-    if (hasHotelEntities) {
-        console.log('\n  🏨 Сущности гостиниц:');
-
-        for (const [id, name] of accommodationsMap) {
-            await mapEntity(id, name, (n) => pazlApi.findHotelAccommodation(n), mappings.hotel_accommodations, name);
-        }
-        for (const [id, name] of infraTypesMap) {
-            await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructureType(n), mappings.hotel_infrastructure_types, name);
-        }
-        for (const [id, name] of infrastructuresMap) {
-            await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructure(n), mappings.hotel_infrastructures, name);
-        }
-        for (const [id, name] of roomTypesMap) {
-            await mapEntity(id, name, (n) => pazlApi.findRoomType(n), mappings.room_types, name);
-        }
-        for (const [id, name] of roomPlacesMap) {
-            await mapEntity(id, name, (n) => pazlApi.findRoomPlace(n), mappings.room_places, name);
-        }
-        for (const [id, name] of roomDescriptionsMap) {
-            await mapEntity(id, name, (n) => pazlApi.findRoomDescription(n), mappings.room_descriptions, name);
-        }
-        for (const [id, name] of roomServicesMap) {
-            await mapEntity(id, name, (n) => pazlApi.findRoomService(n), mappings.room_services, name);
-        }
-        for (const [id, name] of roomEquipmentsMap) {
-            await mapEntity(id, name, (n) => pazlApi.findRoomEquipment(n), mappings.room_equipments, name);
-        }
-        for (const [id, name] of roomFurnituresMap) {
-            await mapEntity(id, name, (n) => pazlApi.findRoomFurniture(n), mappings.room_furnitures, name);
-        }
-        for (const [id, name] of roomBathroomsMap) {
-            await mapEntity(id, name, (n) => pazlApi.findRoomBathroom(n), mappings.room_bathrooms, name);
-        }
+    for (const [id, name] of accommodationsMap) {
+        await mapEntity(id, name, (n) => pazlApi.findHotelAccommodation(n), mappings.hotel_accommodations, name);
+    }
+    for (const [id, name] of infraTypesMap) {
+        await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructureType(n), mappings.hotel_infrastructure_types, name);
+    }
+    for (const [id, name] of infrastructuresMap) {
+        await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructure(n), mappings.hotel_infrastructures, name);
+    }
+    for (const [id, name] of roomTypesMap) {
+        await mapEntity(id, name, (n) => pazlApi.findRoomType(n), mappings.room_types, name);
+    }
+    for (const [id, name] of roomPlacesMap) {
+        await mapEntity(id, name, (n) => pazlApi.findRoomPlace(n), mappings.room_places, name);
+    }
+    for (const [id, name] of roomDescriptionsMap) {
+        await mapEntity(id, name, (n) => pazlApi.findRoomDescription(n), mappings.room_descriptions, name);
+    }
+    for (const [id, name] of roomServicesMap) {
+        await mapEntity(id, name, (n) => pazlApi.findRoomService(n), mappings.room_services, name);
+    }
+    for (const [id, name] of roomEquipmentsMap) {
+        await mapEntity(id, name, (n) => pazlApi.findRoomEquipment(n), mappings.room_equipments, name);
+    }
+    for (const [id, name] of roomFurnituresMap) {
+        await mapEntity(id, name, (n) => pazlApi.findRoomFurniture(n), mappings.room_furnitures, name);
+    }
+    for (const [id, name] of roomBathroomsMap) {
+        await mapEntity(id, name, (n) => pazlApi.findRoomBathroom(n), mappings.room_bathrooms, name);
     }
 
     // 9. Каталоги
@@ -821,9 +1312,605 @@ async function performMapping(
     }
 
     console.log(`\n  📈 ВСЕГО: нужно создать ${totalToCreate}, уже существует ${totalExists}`);
-    console.log('='.repeat(80));
 
     return { mappings, stats: { totalToCreate, totalExists } };
+}
+
+// ============================================
+// СОЗДАНИЕ НЕДОСТАЮЩИХ СУЩНОСТЕЙ
+// ============================================
+
+async function createMissingEntities(
+    pazlApi: PazlApiClient,
+    mappings: any,
+    aviannaApi: AviannaApiClient,
+    tourData: any
+): Promise<Map<string, CreatedEntity>> {
+    const createdEntities = new Map<string, CreatedEntity>();
+
+    console.log('\n' + '='.repeat(80));
+    console.log('🔨 СОЗДАНИЕ НЕДОСТАЮЩИХ СУЩНОСТЕЙ В PAZL TOURS');
+    console.log('='.repeat(80));
+
+    const citiesMap = new Map<number, number>();
+    for (const city of mappings.cities) {
+        if (!city.needs_creation && city.pazl_id) {
+            citiesMap.set(city.source_id, city.pazl_id);
+        }
+    }
+
+    // 1. Города
+    const citiesToCreate = mappings.cities.filter((c: MappedEntity) => c.needs_creation);
+    for (const city of citiesToCreate) {
+        console.log(`\n  🏙️ Создание города: ${city.source_name}`);
+        const result = await pazlApi.createCity(city.source_name);
+        if (result) {
+            const found = await pazlApi.findCity(city.source_name);
+            if (found) {
+                city.pazl_id = found.id;
+                city.pazl_name = found.name;
+                city.needs_creation = false;
+                citiesMap.set(city.source_id, found.id);
+                createdEntities.set(`city_${city.source_id}`, {
+                    type: 'city',
+                    source_name: city.source_name,
+                    pazl_id: found.id
+                });
+                console.log(`    ✅ Создан город: ${city.source_name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    // 2. Категория тура
+    const categoriesToCreate = mappings.tour_categories.filter((c: MappedEntity) => c.needs_creation);
+    for (const category of categoriesToCreate) {
+        console.log(`\n  📁 Создание категории: ${category.source_name}`);
+        const result = await pazlApi.createTourCategory(category.source_name);
+        if (result) {
+            const found = await pazlApi.findTourCategory(category.source_name);
+            if (found) {
+                category.pazl_id = found.id;
+                category.pazl_name = found.name;
+                category.needs_creation = false;
+                createdEntities.set(`tour_category_${category.source_id}`, {
+                    type: 'tour_category',
+                    source_name: category.source_name,
+                    pazl_id: found.id
+                });
+                console.log(`    ✅ Создана категория: ${category.source_name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    // 3. Питание в гостиницах
+    const mealsToCreate = mappings.hotel_meals.filter((m: MappedEntity) => m.needs_creation);
+    for (const meal of mealsToCreate) {
+        console.log(`\n  🍽️ Создание питания: ${meal.source_name}`);
+        const result = await pazlApi.createHotelMeal(meal.source_name);
+        if (result) {
+            const found = await pazlApi.findHotelMeal(meal.source_name);
+            if (found) {
+                meal.pazl_id = found.id;
+                meal.pazl_name = found.name;
+                meal.needs_creation = false;
+                createdEntities.set(`hotel_meal_${meal.source_id}`, {
+                    type: 'hotel_meal',
+                    source_name: meal.source_name,
+                    pazl_id: found.id
+                });
+                console.log(`    ✅ Создано питание: ${meal.source_name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    // 4. Типы инфраструктуры гостиниц
+    const infraTypesToCreate = mappings.hotel_infrastructure_types.filter((t: MappedEntity) => t.needs_creation);
+    for (const type of infraTypesToCreate) {
+        console.log(`\n  🏗️ Создание типа инфраструктуры: ${type.source_name}`);
+        const result = await pazlApi.createHotelInfrastructureType(type.source_name);
+        if (result) {
+            const found = await pazlApi.findHotelInfrastructureType(type.source_name);
+            if (found) {
+                type.pazl_id = found.id;
+                type.pazl_name = found.name;
+                type.needs_creation = false;
+                createdEntities.set(`infra_type_${type.source_id}`, {
+                    type: 'hotel_infrastructure_type',
+                    source_name: type.source_name,
+                    pazl_id: found.id
+                });
+                console.log(`    ✅ Создан тип: ${type.source_name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    // 5. Инфраструктуры гостиниц
+    const infrastructuresToCreate = mappings.hotel_infrastructures.filter((i: MappedEntity) => i.needs_creation);
+    for (const infra of infrastructuresToCreate) {
+        let typeId = 1;
+        for (const hotel of (tourData.hotels || [])) {
+            if (hotel.infrastructures) {
+                const hotelInfra = hotel.infrastructures.find((hi: any) => hi.id === infra.source_id);
+                if (hotelInfra) {
+                    if (hotelInfra.infrastructure_type?.id) {
+                        const typeMapping = mappings.hotel_infrastructure_types.find(
+                            (t: MappedEntity) => t.source_id === hotelInfra.infrastructure_type.id
+                        );
+                        if (typeMapping && !typeMapping.needs_creation) {
+                            typeId = typeMapping.pazl_id!;
+                        }
+                    } else if (hotelInfra.infrastructure_type_id) {
+                        const typeMapping = mappings.hotel_infrastructure_types.find(
+                            (t: MappedEntity) => t.source_id === hotelInfra.infrastructure_type_id
+                        );
+                        if (typeMapping && !typeMapping.needs_creation) {
+                            typeId = typeMapping.pazl_id!;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        console.log(`\n  🏗️ Создание инфраструктуры: ${infra.source_name} (тип ID: ${typeId})`);
+        const result = await pazlApi.createHotelInfrastructure(infra.source_name, typeId);
+        if (result) {
+            const found = await pazlApi.findHotelInfrastructure(infra.source_name);
+            if (found) {
+                infra.pazl_id = found.id;
+                infra.pazl_name = found.name;
+                infra.needs_creation = false;
+                createdEntities.set(`infra_${infra.source_id}`, {
+                    type: 'hotel_infrastructure',
+                    source_name: infra.source_name,
+                    pazl_id: found.id
+                });
+                console.log(`    ✅ Создана инфраструктура: ${infra.source_name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    // 6. Услуги тура
+    const servicesToCreate = mappings.tour_services.filter((s: MappedEntity) => s.needs_creation);
+    for (const service of servicesToCreate) {
+        let serviceClass = 'group';
+        if (service.source_type === 'required_service') {
+            serviceClass = 'individual';
+        }
+
+        const serviceData = tourData.services_data?.[service.source_id];
+        const serviceDates: any[] = [];
+
+        if (serviceData?.dates && Array.isArray(serviceData.dates)) {
+            for (const date of serviceData.dates) {
+                serviceDates.push({
+                    id: null,
+                    from: date.from || "2026-01-01",
+                    to: date.to || "2026-12-31",
+                    vendor_price: date.vendor_price?.toString() || "0",
+                    adult_price: date.adult_price?.toString() || "0",
+                    child_prices: date.child_prices || [],
+                    commission_adult_type: date.commission_adult_type || 1,
+                    commission_adult_sum: date.commission_adult_sum || 0,
+                    commission_child_type: date.commission_child_type || 1,
+                    commission_child_sum: date.commission_child_sum || 0
+                });
+            }
+        }
+
+        console.log(`\n  🛠️ Создание услуги: ${service.source_name} (класс: ${serviceClass}, дат: ${serviceDates.length})`);
+        const result = await pazlApi.createTourService(service.source_name, serviceClass, serviceDates);
+        if (result) {
+            const found = await pazlApi.findTourService(service.source_name);
+            if (found) {
+                service.pazl_id = found.id;
+                service.pazl_name = found.name;
+                service.needs_creation = false;
+                createdEntities.set(`tour_service_${service.source_id}`, {
+                    type: 'tour_service',
+                    source_name: service.source_name,
+                    pazl_id: found.id
+                });
+                console.log(`    ✅ Создана услуга: ${service.source_name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    // 7. Транспортный маршрут
+    const transportsToCreate = mappings.transports.filter((t: MappedEntity) => t.needs_creation);
+    for (const transport of transportsToCreate) {
+        console.log(`\n  🚌 Создание транспортного маршрута: ${transport.source_name}`);
+
+        let transportationId = 1;
+        if (tourData.transport_forth?.transportation) {
+            const transportationMapping = mappings.transportations.find(
+                (t: MappedEntity) => t.source_id === tourData.transport_forth.transportation.id
+            );
+            if (transportationMapping && !transportationMapping.needs_creation) {
+                transportationId = transportationMapping.pazl_id!;
+            }
+        }
+
+        const result = await pazlApi.createTransport(transportationId, transport.source_name, tourData, citiesMap);
+        if (result) {
+            const found = await pazlApi.findTransport(transport.source_name);
+            if (found) {
+                transport.pazl_id = found.id;
+                transport.pazl_name = found.name;
+                transport.needs_creation = false;
+                createdEntities.set(`transport_${transport.source_id}`, {
+                    type: 'transport',
+                    source_name: transport.source_name,
+                    pazl_id: found.id
+                });
+                console.log(`    ✅ Создан транспортный маршрут: ${transport.source_name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    // 8. Гостиницы
+    const hotelsToCreate = mappings.hotels.filter((h: MappedEntity) => h.needs_creation);
+    for (const hotel of hotelsToCreate) {
+        console.log(`\n  🏨 Создание гостиницы: ${hotel.source_name}`);
+
+        const hotelData = tourData.hotels?.find((h: any) => h.id === hotel.source_id);
+        if (hotelData) {
+            const result = await pazlApi.createHotel(hotel.source_name, hotelData, mappings);
+            if (result) {
+                const found = await pazlApi.findHotel(hotel.source_name);
+                if (found) {
+                    hotel.pazl_id = found.id;
+                    hotel.pazl_name = found.name;
+                    hotel.needs_creation = false;
+                    createdEntities.set(`hotel_${hotel.source_id}`, {
+                        type: 'hotel',
+                        source_name: hotel.source_name,
+                        pazl_id: found.id
+                    });
+                    console.log(`    ✅ Создана гостиница: ${hotel.source_name} (ID: ${found.id})`);
+                }
+            }
+        }
+    }
+
+    return createdEntities;
+}
+
+// ============================================
+// СОЗДАНИЕ ТУРА
+// ============================================
+
+async function createTour(
+    pazlApi: PazlApiClient,
+    tourData: any,
+    mappings: any
+): Promise<boolean> {
+    console.log('\n' + '='.repeat(80));
+    console.log('🎯 СОЗДАНИЕ ТУРА В PAZL TOURS');
+    console.log('='.repeat(80));
+
+    let category = mappings.tour_categories.find((c: MappedEntity) => c.source_id === tourData.category_id);
+
+    if (!category || category.needs_creation) {
+        const categoryName = 'Автобусные туры';
+        console.log(`  📁 Категория "${categoryName}" не найдена, создаём...`);
+        const createResult = await pazlApi.createTourCategory(categoryName);
+        if (createResult) {
+            const found = await pazlApi.findTourCategory(categoryName);
+            if (found) {
+                category = {
+                    source_id: tourData.category_id,
+                    source_name: categoryName,
+                    pazl_id: found.id,
+                    pazl_name: found.name,
+                    needs_creation: false
+                };
+                console.log(`  ✅ Категория создана: ${found.name} (ID: ${found.id})`);
+            }
+        }
+    }
+
+    const transportForth = mappings.transports.find((t: MappedEntity) => t.source_id === tourData.transport_forth_id);
+
+    const hotels: any[] = [];
+    if (tourData.hotels) {
+        for (const hotel of tourData.hotels) {
+            const mappedHotel = mappings.hotels.find((h: MappedEntity) => h.source_id === hotel.id);
+            if (mappedHotel && !mappedHotel.needs_creation) {
+                const cityId = hotel.city?.id;
+                const mappedCity = cityId ? mappings.cities.find((c: MappedEntity) => c.source_id === cityId) : null;
+
+                const hotelEntry: any = {
+                    id: mappedHotel.pazl_id,
+                    city_id: mappedCity?.pazl_id || null,
+                    arrival_day: hotel.arrival_day?.toString() || "1",
+                    departure_day: hotel.departure_day?.toString() || "2"
+                };
+
+                if (hotel.meal_id) {
+                    const mealMapping = mappings.hotel_meals.find((m: MappedEntity) => m.source_id === hotel.meal_id);
+                    if (mealMapping && !mealMapping.needs_creation) {
+                        hotelEntry.meal_id = mealMapping.pazl_id;
+                    }
+                }
+
+                hotels.push(hotelEntry);
+                console.log(`  🏨 Добавлена гостиница: ${mappedHotel.pazl_name} (ID: ${mappedHotel.pazl_id})`);
+            }
+        }
+    }
+
+    const requiredServices: any[] = [];
+    if (tourData.required_services) {
+        for (const service of tourData.required_services) {
+            const mappedService = mappings.tour_services.find((s: MappedEntity) => s.source_id === service.id);
+            if (mappedService && !mappedService.needs_creation) {
+                requiredServices.push({
+                    id: mappedService.pazl_id,
+                    day: service.day?.toString() || "1",
+                    service_class: "individual"
+                });
+                console.log(`  🛠️ Добавлена обязательная услуга: ${mappedService.pazl_name} (ID: ${mappedService.pazl_id})`);
+            }
+        }
+    }
+
+    const additionalServices: any[] = [];
+    if (tourData.additional_services) {
+        for (const service of tourData.additional_services) {
+            const mappedService = mappings.tour_services.find((s: MappedEntity) => s.source_id === service.id);
+            if (mappedService && !mappedService.needs_creation) {
+                additionalServices.push({
+                    id: mappedService.pazl_id,
+                    day: service.day?.toString() || "1",
+                    service_class: "group"
+                });
+                console.log(`  🛠️ Добавлена дополнительная услуга: ${mappedService.pazl_name} (ID: ${mappedService.pazl_id})`);
+            }
+        }
+    }
+
+    const servicesInTour: any[] = [];
+    if (tourData.services) {
+        for (const service of tourData.services) {
+            const mappedService = mappings.tour_services.find((s: MappedEntity) => s.source_id === service.id);
+            if (mappedService && !mappedService.needs_creation) {
+                servicesInTour.push({
+                    id: mappedService.pazl_id,
+                    day: service.day?.toString() || "1",
+                    service_class: "group"
+                });
+                console.log(`  🛠️ Добавлена услуга: ${mappedService.pazl_name} (ID: ${mappedService.pazl_id})`);
+            }
+        }
+    }
+
+    const meals: any[] = [];
+    if (tourData.meals) {
+        for (const meal of tourData.meals) {
+            meals.push({
+                id: null,
+                name: meal.name,
+                vendor_id: 2,
+                days: meal.days || [1],
+                vendor_name: meal.vendor_name || "",
+                dates: meal.dates?.map((d: any) => ({
+                    id: null,
+                    from: d.from || "2026-01-01",
+                    to: d.to || "2026-12-31",
+                    price: d.price?.toString() || "0",
+                    commission_type: d.commission_type || 1,
+                    commission_sum: d.commission_sum || 0
+                })) || [],
+                can_delete: true,
+                sum: "0",
+                commission_type: 1,
+                commission_sum: 0,
+                uid: Date.now() + Math.random()
+            });
+        }
+    }
+
+    const dates: any[] = [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (tourData.dates && tourData.dates.length > 0) {
+        for (const date of tourData.dates) {
+            const dateStr = date.start_date || date;
+            const formattedDate = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+
+            const checkDate = new Date(formattedDate);
+            if (!isNaN(checkDate.getTime()) && checkDate >= today) {
+                dates.push({ start_date: formattedDate });
+            } else {
+                console.log(`  ⚠️ Дата ${formattedDate} уже прошла или некорректна, пропускаем`);
+            }
+        }
+        if (dates.length > 0) {
+            console.log(`  📅 Даты тура: ${dates.map((d: any) => d.start_date).join(', ')}`);
+        }
+    }
+
+    if (dates.length === 0) {
+        console.log(`  ❌ Нет будущих дат тура, тур не может быть создан`);
+        return false;
+    }
+
+    const days: any[] = [];
+    if (tourData.days && tourData.days.length > 0) {
+        for (const day of tourData.days) {
+            days.push({
+                name: day.name || "День",
+                description: day.description || "",
+                photos: []
+            });
+        }
+    } else if (tourData.description) {
+        days.push({
+            name: "День 1",
+            description: tourData.description,
+            photos: []
+        });
+    }
+
+    const tradeOffers: any[] = [];
+    if (tourData.trade_offers && Array.isArray(tourData.trade_offers)) {
+        const pazlTradeOffers = await pazlApi.apiRequest<any>('/tours/excursion/trade-offers?limit=100');
+        const validIds = new Set<number>();
+        if (pazlTradeOffers?.data && Array.isArray(pazlTradeOffers.data)) {
+            for (const to of pazlTradeOffers.data) {
+                validIds.add(to.id);
+            }
+        }
+
+        for (const offerId of tourData.trade_offers) {
+            if (typeof offerId === 'number' && validIds.has(offerId)) {
+                tradeOffers.push(offerId);
+                console.log(`  📊 Добавлено торговое предложение ID: ${offerId}`);
+            } else {
+                console.log(`  ⚠️ Торговое предложение ID ${offerId} не найдено в Pazl, пропускаем`);
+            }
+        }
+    }
+
+    const catalogSections: any[] = [];
+    if (tourData.catalog_sections && Array.isArray(tourData.catalog_sections)) {
+        for (const section of tourData.catalog_sections) {
+            const sectionId = section.id;
+            if (typeof sectionId === 'number') {
+                const mappedSection = mappings.catalog_sections.find((s: MappedEntity) => s.source_id === sectionId);
+                if (mappedSection && !mappedSection.needs_creation) {
+                    catalogSections.push({
+                        id: mappedSection.pazl_id,
+                        sum: section.sum || "0",
+                        sort: section.sort || 0
+                    });
+                    console.log(`  📂 Добавлен каталог: ${mappedSection.pazl_name} (ID: ${mappedSection.pazl_id}, sum: ${section.sum}, sort: ${section.sort})`);
+                } else {
+                    console.log(`  ⚠️ Каталог "${section.name || sectionId}" не найден в Pazl, пропускаем`);
+                }
+            }
+        }
+    }
+
+    let tourCityId = null;
+    if (tourData.tour_type_id == 2) {
+        if (mappings.cities.length > 0) {
+            tourCityId = mappings.cities[0].pazl_id;
+        }
+        if (!tourCityId) {
+            const nnCity = await pazlApi.findCity('Нижний Новгород');
+            if (nnCity) {
+                tourCityId = nnCity.id;
+            }
+        }
+        console.log(`  🏙️ Для пешеходного тура установлен город ID: ${tourCityId}`);
+    }
+
+    let additionalDatesHtml = "";
+    if (dates.length > 0) {
+        const dateStrings = dates.map((d: any) => d.start_date);
+        additionalDatesHtml = `<p>Даты тура: ${dateStrings.join(', ')}</p>`;
+    }
+
+    let additionalCitiesHtml = "";
+    if (tourData.transport_forth?.routes) {
+        const routes = tourData.transport_forth.routes;
+        const allPoints: any[] = [];
+
+        if (routes.start?.point_city_id) {
+            const cityMapping = mappings.cities.find((c: MappedEntity) => c.source_id === routes.start.point_city_id);
+            allPoints.push({
+                city: cityMapping?.pazl_name || cityMapping?.source_name || "Неизвестно",
+                info: routes.start.info || "",
+                time: routes.start.start_time || ""
+            });
+        }
+
+        if (routes.intermediates) {
+            for (const point of routes.intermediates) {
+                const cityMapping = mappings.cities.find((c: MappedEntity) => c.source_id === point.point_city_id);
+                allPoints.push({
+                    city: cityMapping?.pazl_name || cityMapping?.source_name || "Неизвестно",
+                    info: point.info || "",
+                    time: point.start_time || point.finish_time || ""
+                });
+            }
+        }
+
+        if (allPoints.length > 0) {
+            additionalCitiesHtml = "<p><strong>Города и точки посадки:</strong></p><ul>";
+            for (const point of allPoints) {
+                const timeStr = point.time ? ` (${point.time})` : '';
+                const infoStr = point.info ? ` - ${point.info}` : '';
+                additionalCitiesHtml += `<li>${point.city}${timeStr}${infoStr}</li>`;
+            }
+            additionalCitiesHtml += "</ul>";
+        }
+    }
+
+    const tourPayload = {
+        id: null,
+        name: tourData.name,
+        is_active: tourData.is_active || false,
+        is_hotel_selection: false,
+        application_auto_confirm: false,
+        auto_confirm_status: null,
+        duration: tourData.duration?.toString() || "1",
+        tour_type_id: tourData.tour_type_id || 1,
+        city_id: tourCityId,
+        hotels: hotels,
+        dates: dates,
+        days: days,
+        services: servicesInTour,
+        required_services: requiredServices,
+        additional_services: additionalServices,
+        catalog_sections: catalogSections,
+        trade_offers: tradeOffers,
+        photos: [],
+        files: [],
+        videos: [],
+        short_description: tourData.short_description || "",
+        description: tourData.description || "",
+        info: tourData.info || "",
+        additional_dates: additionalDatesHtml,
+        additional_cities: additionalCitiesHtml || tourData.info || "",
+        additional_price: tourData.additional_price || "",
+        additional_price_includes: tourData.additional_price_includes || "",
+        additional_extra_price: tourData.additional_extra_price || "",
+        commission_transport_type: 1,
+        commission_transport_sum: "0",
+        commission_accommodation_type: 1,
+        commission_accommodation_sum: "0",
+        commission_agency_type: "2",
+        commission_agency_sum: tourData.commission_agency_sum?.toString() || "0",
+        meal_price: null,
+        commission_meal_type: 1,
+        commission_meal_sum: null,
+        adult_price: tourData.adult_price?.toString() || null,
+        commission_adult_type: 1,
+        commission_adult_sum: null,
+        child_price: tourData.child_price?.toString() || null,
+        commission_child_type: 1,
+        commission_child_sum: null,
+        meals: meals,
+        status: 1,
+        category_id: category?.pazl_id || null,
+        transport_forth_id: transportForth?.pazl_id || null
+    };
+
+    console.log('\n  📤 Отправка данных тура...');
+
+    const result = await pazlApi.apiRequest('/tours', { method: 'POST', body: { payload: JSON.stringify(tourPayload) } });
+
+    if (result) {
+        console.log('  ✅ Тур успешно создан!');
+        return true;
+    } else {
+        console.log('  ❌ Ошибка при создании тура');
+        return false;
+    }
 }
 
 // ============================================
@@ -840,16 +1927,14 @@ router.post('/', async (req: Request, res: Response) => {
         });
     }
 
+    console.log('\n' + '='.repeat(80));
+    console.log('🔄 МИГРАЦИЯ ТУРА AVIANNA → PAZL TOURS');
+    console.log('='.repeat(80));
+    console.log(`🎯 Тур: "${tourName}"`);
+
     let browser: any = null;
 
     try {
-        console.log('\n' + '='.repeat(80));
-        console.log('🔄 МИГРАЦИЯ ТУРА AVIANNA → PAZL TOURS');
-        console.log('='.repeat(80));
-        console.log(`🎯 Тур: "${tourName}"`);
-        console.log(`📧 Avianna: ${aviannaEmail}`);
-        console.log(`📧 Pazl: ${pazlEmail}`);
-
         browser = await chromium.launch({
             headless: true,
             executablePath: '/snap/bin/chromium',
@@ -863,9 +1948,16 @@ router.post('/', async (req: Request, res: Response) => {
 
         const context = await browser.newContext();
 
-        // Вход в Avianna
-        console.log('\n🔐 Вход в Avianna...');
+        // ============================================
+        // ВХОД В AVIANNA
+        // ============================================
+        console.log('\n' + '='.repeat(80));
+        console.log('🔐 ВХОД В AVIANNA');
+        console.log('='.repeat(80));
+
         const aviannaPage = await context.newPage();
+
+        console.log('\n  🔄 Вход в Avianna...');
         await aviannaPage.goto('https://manager.avianna24.ru/auth');
         await aviannaPage.waitForTimeout(2000);
         await aviannaPage.fill('input[type="text"]', aviannaEmail);
@@ -874,6 +1966,7 @@ router.post('/', async (req: Request, res: Response) => {
         await aviannaPage.waitForTimeout(5000);
 
         if (aviannaPage.url().includes('/auth')) {
+            console.log('❌ Ошибка входа в Avianna');
             await browser.close();
             return res.status(401).json({
                 success: false,
@@ -882,13 +1975,21 @@ router.post('/', async (req: Request, res: Response) => {
         }
 
         console.log('✅ Вход в Avianna выполнен!');
+
         const aviannaApi = new AviannaApiClient(aviannaPage);
 
-        // Поиск тура
+        // ============================================
+        // ПОИСК ТУРА В AVIANNA
+        // ============================================
+        console.log('\n' + '='.repeat(80));
+        console.log('📥 ПОИСК ТУРА В AVIANNA');
+        console.log('='.repeat(80));
+
         console.log(`\n🔍 Поиск тура: "${tourName}"`);
         const toursResult = await aviannaApi.getTours(tourName);
 
         if (!toursResult?.data || toursResult.data.length === 0) {
+            console.log('❌ Тур не найден');
             await browser.close();
             return res.status(404).json({
                 success: false,
@@ -899,12 +2000,10 @@ router.post('/', async (req: Request, res: Response) => {
         const tourBasic = toursResult.data.find((t: any) => t.name === tourName) || toursResult.data[0];
         console.log(`✅ Найден: ${tourBasic.name} (ID: ${tourBasic.id})`);
 
-        // Загрузка данных тура
-        console.log('\n📥 ЗАГРУЗКА ДАННЫХ ТУРА ИЗ AVIANNA');
-        console.log('='.repeat(80));
         const tourData = await extractTourData(aviannaApi, tourBasic.id);
 
         if (!tourData) {
+            console.log('❌ Не удалось загрузить данные тура');
             await browser.close();
             return res.status(500).json({
                 success: false,
@@ -912,17 +2011,18 @@ router.post('/', async (req: Request, res: Response) => {
             });
         }
 
-        // Сохраняем данные локально
-        const sourceFile = `avianna-tour-${tourData.id}.json`;
-        fs.writeFileSync(sourceFile, JSON.stringify(tourData, null, 2));
-        console.log(`\n💾 Данные Avianna сохранены в: ${sourceFile}`);
+        // ============================================
+        // ВХОД В PAZL TOURS
+        // ============================================
+        console.log('\n' + '='.repeat(80));
+        console.log('🔐 ВХОД В PAZL TOURS');
+        console.log('='.repeat(80));
 
-        // Вход в Pazl Tours
-        console.log('\n🔐 Вход в Pazl Tours...');
         const pazlPage = await context.newPage();
         const pazlLoggedIn = await loginToPazl(pazlPage, pazlEmail, pazlPassword);
 
         if (!pazlLoggedIn) {
+            console.log('\n❌ Не удалось войти в Pazl Tours');
             await browser.close();
             return res.status(401).json({
                 success: false,
@@ -932,40 +2032,55 @@ router.post('/', async (req: Request, res: Response) => {
 
         const pazlApi = new PazlApiClient(pazlPage);
 
-        // Поиск соответствий
-        console.log('\n🔍 ПОИСК СООТВЕТСТВИЙ...');
+        // ============================================
+        // ПОИСК СООТВЕТСТВИЙ
+        // ============================================
         const { mappings, stats } = await performMapping(aviannaApi, pazlApi, tourData);
 
-        const resultFile = `migration-result-${tourData.id}.json`;
-        const fullResult = {
-            source_tour: {
-                id: tourData.id,
-                name: tourData.name
-            },
-            mappings,
-            stats: {
-                totalToCreate: stats.totalToCreate,
-                totalExists: stats.totalExists,
-                total: stats.totalToCreate + stats.totalExists
-            },
-            message: 'Маппинг выполнен успешно'
-        };
+        // ============================================
+        // СОЗДАНИЕ НЕДОСТАЮЩИХ СУЩНОСТЕЙ
+        // ============================================
+        const createdEntities = await createMissingEntities(pazlApi, mappings, aviannaApi, tourData);
 
-        fs.writeFileSync(resultFile, JSON.stringify(fullResult, null, 2));
-        console.log(`\n💾 Результаты сохранены в: ${resultFile}`);
+        // ============================================
+        // СОЗДАНИЕ ТУРА
+        // ============================================
+        const tourCreated = await createTour(pazlApi, tourData, mappings);
+
+        console.log('\n' + '='.repeat(80));
+        console.log('✅ МИГРАЦИЯ ЗАВЕРШЕНА!');
+        console.log('='.repeat(80));
+
+        if (tourCreated) {
+            console.log('\n✅ ТУР УСПЕШНО СОЗДАН В PAZL TOURS!');
+        } else {
+            console.log('\n⚠️ Возникли проблемы при создании тура.');
+        }
 
         await browser.close();
 
-        console.log('\n✅ МИГРАЦИЯ ЗАВЕРШЕНА!');
-
-        // Возвращаем результат
         res.json({
             success: true,
-            data: fullResult
+            data: {
+                tourData: {
+                    id: tourData.id,
+                    name: tourData.name
+                },
+                mappings,
+                createdEntities: Array.from(createdEntities.values()),
+                stats: {
+                    totalToCreate: stats.totalToCreate,
+                    totalExists: stats.totalExists,
+                    total: stats.totalToCreate + stats.totalExists,
+                    created: createdEntities.size
+                },
+                tourCreated,
+                message: tourCreated ? 'Тур успешно создан!' : 'Маппинг выполнен, но тур не создан'
+            }
         });
 
     } catch (error: any) {
-        console.error('\n❌ Ошибка миграции:', error);
+        console.error('\n❌ ОШИБКА:', error);
         if (browser) {
             try { await browser.close(); } catch (e) {}
         }
