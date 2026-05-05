@@ -23,14 +23,6 @@ interface CreatedEntity {
     original_data?: any;
 }
 
-// Типы для page.evaluate
-interface FetchApiParams {
-    fetchUrl: string;
-    fetchMethod: string;
-    fetchBody?: any;
-    xsrfToken: string;
-}
-
 // ============================================
 // API КЛИЕНТ AVIANNA
 // ============================================
@@ -44,27 +36,47 @@ class AviannaApiClient {
         const cacheKey = url;
 
         if (this.cache.has(cacheKey)) {
+            console.log(`      📦 Avianna кеш: ${url}`);
             return this.cache.get(cacheKey) as T;
         }
 
         const fullUrl = url.startsWith('http') ? url : `https://gate.avianna24.ru/api${url}`;
 
         try {
-            const result = await this.page.evaluate(async (fetchUrl: string) => {
-                const response = await fetch(fetchUrl, {
-                    credentials: 'include',
-                    headers: {
-                        'Accept': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest'
+            console.log(`      🌐 Avianna запрос: ${fullUrl}`);
+
+            const result = await Promise.race([
+                this.page.evaluate(async (fetchUrl: string) => {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+                    try {
+                        const response = await fetch(fetchUrl, {
+                            credentials: 'include',
+                            headers: {
+                                'Accept': 'application/json',
+                                'X-Requested-With': 'XMLHttpRequest'
+                            },
+                            signal: controller.signal
+                        });
+
+                        clearTimeout(timeoutId);
+
+                        if (!response.ok) {
+                            return null;
+                        }
+
+                        return response.json();
+                    } catch (e: any) {
+                        clearTimeout(timeoutId);
+                        console.error('Avianna fetch error:', e.message);
+                        return null;
                     }
-                });
-
-                if (!response.ok) {
-                    return null;
-                }
-
-                return response.json();
-            }, fullUrl);
+                }, fullUrl),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Avianna API timeout')), 35000)
+                )
+            ]);
 
             if (result) {
                 this.cache.set(cacheKey, result);
@@ -72,8 +84,8 @@ class AviannaApiClient {
 
             return result as T;
 
-        } catch (error) {
-            console.log(`      ⚠️ Ошибка запроса: ${url}`);
+        } catch (error: any) {
+            console.log(`      ⚠️ Ошибка Avianna запроса: ${url} - ${error.message}`);
             return null;
         }
     }
@@ -276,6 +288,7 @@ class PazlApiClient {
             const match = document.cookie.match(/XSRF-TOKEN=([^;]+)/);
             return match ? decodeURIComponent(match[1]) : '';
         });
+        console.log(`      🔑 XSRF токен получен: ${this.xsrfToken ? 'да' : 'нет'}`);
     }
 
     async apiRequest<T>(url: string, options?: { method?: string; body?: any }): Promise<T | null> {
@@ -284,65 +297,93 @@ class PazlApiClient {
         const fullUrl = url.startsWith('http') ? url : `https://gate.pazltours.online/api${url}`;
         const method = options?.method || 'GET';
 
+        console.log(`      🌐 Pazl запрос: ${method} ${fullUrl}`);
+
         try {
-            const result = await this.page.evaluate(async (params: FetchApiParams) => {
-                const headers: Record<string, string> = {
-                    'Accept': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'X-XSRF-TOKEN': params.xsrfToken
-                };
+            const result = await Promise.race([
+                this.page.evaluate(async (params: {
+                    fetchUrl: string;
+                    fetchMethod: string;
+                    fetchBody?: any;
+                    xsrfToken: string;
+                }) => {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-                if (params.fetchMethod !== 'GET') {
-                    headers['Content-Type'] = 'application/json';
-                }
+                    try {
+                        const headers: Record<string, string> = {
+                            'Accept': 'application/json',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            'X-XSRF-TOKEN': params.xsrfToken
+                        };
 
-                const fetchOptions: RequestInit = {
-                    method: params.fetchMethod,
-                    headers: headers,
-                    credentials: 'include'
-                };
+                        if (params.fetchMethod !== 'GET') {
+                            headers['Content-Type'] = 'application/json';
+                        }
 
-                if (params.fetchMethod !== 'GET' && params.fetchBody) {
-                    fetchOptions.body = JSON.stringify(params.fetchBody);
-                }
+                        const fetchOptions: RequestInit = {
+                            method: params.fetchMethod,
+                            headers: headers,
+                            credentials: 'include',
+                            signal: controller.signal
+                        };
 
-                const response = await fetch(params.fetchUrl, fetchOptions);
+                        if (params.fetchMethod !== 'GET' && params.fetchBody) {
+                            fetchOptions.body = JSON.stringify(params.fetchBody);
+                        }
 
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    return {
-                        __error: true,
-                        __status: response.status,
-                        __statusText: response.statusText,
-                        __body: errorText
-                    };
-                }
+                        const response = await fetch(params.fetchUrl, fetchOptions);
+                        clearTimeout(timeoutId);
 
-                const text = await response.text();
-                if (!text) {
-                    return { status: 'OK' };
-                }
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            return {
+                                __error: true,
+                                __status: response.status,
+                                __statusText: response.statusText,
+                                __body: errorText
+                            };
+                        }
 
-                try {
-                    return JSON.parse(text);
-                } catch {
-                    return { status: 'OK', data: text };
-                }
-            }, {
-                fetchUrl: fullUrl,
-                fetchMethod: method,
-                fetchBody: options?.body,
-                xsrfToken: this.xsrfToken
-            } as FetchApiParams);
+                        const text = await response.text();
+                        if (!text) {
+                            return { status: 'OK' };
+                        }
+
+                        try {
+                            return JSON.parse(text);
+                        } catch {
+                            return { status: 'OK', data: text };
+                        }
+                    } catch (e: any) {
+                        clearTimeout(timeoutId);
+                        return {
+                            __error: true,
+                            __status: 0,
+                            __statusText: 'Fetch error',
+                            __body: e.message
+                        };
+                    }
+                }, {
+                    fetchUrl: fullUrl,
+                    fetchMethod: method,
+                    fetchBody: options?.body,
+                    xsrfToken: this.xsrfToken
+                }),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Pazl API timeout')), 35000)
+                )
+            ]);
 
             if (result?.__error) {
                 console.log(`      ❌ API Error ${result.__status}: ${result.__body}`);
                 return null;
             }
 
+            console.log(`      ✅ Pazl ответ получен`);
             return result as T;
-        } catch (error) {
-            console.log(`      ⚠️ Ошибка запроса: ${url}`, error);
+        } catch (error: any) {
+            console.log(`      ⚠️ Ошибка Pazl запроса: ${url} - ${error.message}`);
             return null;
         }
     }
@@ -350,16 +391,20 @@ class PazlApiClient {
     async findEntity(endpoint: string, name: string): Promise<{ id: number; name: string } | null> {
         if (!name) return null;
 
+        console.log(`      🔍 Поиск в Pazl: ${endpoint}?query=${encodeURIComponent(name)}`);
         const result = await this.apiRequest<any>(`${endpoint}?query=${encodeURIComponent(name)}&limit=10`);
 
         if (result?.data && Array.isArray(result.data) && result.data.length > 0) {
             const exactMatch = result.data.find((item: any) => item.name === name);
             if (exactMatch) {
+                console.log(`      ✅ Найдено точное совпадение: ${exactMatch.name} (ID: ${exactMatch.id})`);
                 return { id: exactMatch.id, name: exactMatch.name };
             }
+            console.log(`      ✅ Найдено похожее: ${result.data[0].name} (ID: ${result.data[0].id})`);
             return { id: result.data[0].id, name: result.data[0].name };
         }
 
+        console.log(`      ❌ Не найдено`);
         return null;
     }
 
@@ -1005,20 +1050,33 @@ async function performMapping(
         sourceType?: string
     ) => {
         console.log(`    🔍 "${label}" -> Pazl: "${sourceName}"`);
-        const found = await pazlFindMethod(sourceName);
-        targetArray.push({
-            source_id: sourceId,
-            source_name: sourceName,
-            source_type: sourceType,
-            pazl_id: found?.id || null,
-            pazl_name: found?.name || null,
-            needs_creation: !found
-        });
-        const status = found ? '✅' : '⚠️';
-        console.log(`    ${status} ${label}: ${sourceName} -> ${found?.name || 'НЕ НАЙДЕН'}${found ? ` (ID: ${found.id})` : ''}`);
+        try {
+            const found = await pazlFindMethod(sourceName);
+            targetArray.push({
+                source_id: sourceId,
+                source_name: sourceName,
+                source_type: sourceType,
+                pazl_id: found?.id || null,
+                pazl_name: found?.name || null,
+                needs_creation: !found
+            });
+            const status = found ? '✅' : '⚠️';
+            console.log(`    ${status} ${label}: ${sourceName} -> ${found?.name || 'НЕ НАЙДЕН'}${found ? ` (ID: ${found.id})` : ''}`);
+        } catch (error: any) {
+            console.log(`    ❌ Ошибка поиска "${label}": ${error.message}`);
+            targetArray.push({
+                source_id: sourceId,
+                source_name: sourceName,
+                source_type: sourceType,
+                pazl_id: null,
+                pazl_name: null,
+                needs_creation: true
+            });
+        }
     };
 
     // 1. Города
+    console.log('\n  🏙️ Сбор городов из данных тура...');
     const cityIds = new Set<number>();
     if (tourData.transport_forth?.routes) {
         const routes = tourData.transport_forth.routes;
@@ -1036,22 +1094,35 @@ async function performMapping(
         }
     });
 
+    console.log(`  Найдено уникальных городов: ${cityIds.size}`);
+
     if (cityIds.size > 0) {
-        console.log('\n  🏙️ Города:');
+        console.log('  Получение названий городов из Avianna...');
         for (const cityId of cityIds) {
-            const cityName = await aviannaApi.getCityById(cityId);
-            if (cityName) {
-                await mapEntity(cityId, cityName,
+            const hotelWithCity = tourData.hotels?.find((h: any) => h.city?.id === cityId);
+            if (hotelWithCity?.city?.name) {
+                await mapEntity(cityId, hotelWithCity.city.name,
                     (name) => pazlApi.findCity(name),
-                    mappings.cities, cityName);
+                    mappings.cities, hotelWithCity.city.name);
             } else {
-                const hotelWithCity = tourData.hotels?.find((h: any) => h.city?.id === cityId);
-                if (hotelWithCity?.city?.name) {
-                    await mapEntity(cityId, hotelWithCity.city.name,
+                const transportPoint = tourData.transport_forth?.routes;
+                let cityName = null;
+                if (transportPoint) {
+                    if (transportPoint.start?.point_city_id === cityId && transportPoint.start?.info) {
+                        cityName = transportPoint.start.info;
+                    } else if (transportPoint.finish?.point_city_id === cityId && transportPoint.finish?.info) {
+                        cityName = transportPoint.finish.info;
+                    } else {
+                        const intermediate = transportPoint.intermediates?.find((p: any) => p.point_city_id === cityId);
+                        if (intermediate?.info) cityName = intermediate.info;
+                    }
+                }
+                if (cityName) {
+                    await mapEntity(cityId, cityName,
                         (name) => pazlApi.findCity(name),
-                        mappings.cities, hotelWithCity.city.name);
+                        mappings.cities, cityName);
                 } else {
-                    console.log(`    ⚠️ Не удалось получить название города ID: ${cityId}`);
+                    console.log(`    ⚠️ Город ID ${cityId} - нет названия`);
                 }
             }
         }
@@ -1092,7 +1163,7 @@ async function performMapping(
                 (name) => pazlApi.findTourCategory(name),
                 mappings.tour_categories, categoryName);
         } else {
-            console.log(`    ⚠️ Не удалось получить название категории ID: ${tourData.category_id}, используем "Автобусные туры"`);
+            console.log(`    ⚠️ Категория не найдена, используем "Автобусные туры"`);
             await mapEntity(tourData.category_id, 'Автобусные туры',
                 (name) => pazlApi.findTourCategory(name),
                 mappings.tour_categories, 'Автобусные туры');
@@ -1132,6 +1203,7 @@ async function performMapping(
     const tourServicesToFind = new Map<number, any>();
 
     if (tourData.services) {
+        console.log('\n  🛠️ Получение названий услуг...');
         for (const service of tourData.services) {
             const serviceId = service.id;
             if (!tourServicesToFind.has(serviceId)) {
@@ -1183,7 +1255,7 @@ async function performMapping(
     }
 
     if (tourServicesToFind.size > 0) {
-        console.log('\n  🛠️ Услуги тура:');
+        console.log('\n  🛠️ Маппинг услуг тура:');
         for (const [id, serviceData] of tourServicesToFind) {
             await mapEntity(id, serviceData.name,
                 (name) => pazlApi.findTourService(name),
@@ -1205,6 +1277,7 @@ async function performMapping(
     const roomFurnituresMap = new Map<number, string>();
     const roomBathroomsMap = new Map<number, string>();
 
+    console.log('\n  🏨 Сбор сущностей гостиниц...');
     tourData.hotels?.forEach((hotel: any) => {
         hotel.rooms?.forEach((room: any) => {
             if (room.accommodation && !accommodationsMap.has(room.accommodation.id)) {
@@ -1245,7 +1318,9 @@ async function performMapping(
         });
     });
 
-    console.log('\n  🏨 Сущности гостиниц:');
+    console.log(`  Найдено: размещений=${accommodationsMap.size}, типов инфраструктуры=${infraTypesMap.size}, инфраструктур=${infrastructuresMap.size}, типов комнат=${roomTypesMap.size}, мест=${roomPlacesMap.size}, описаний=${roomDescriptionsMap.size}`);
+
+    console.log('\n  🏨 Маппинг сущностей гостиниц...');
 
     for (const [id, name] of accommodationsMap) {
         await mapEntity(id, name, (n) => pazlApi.findHotelAccommodation(n), mappings.hotel_accommodations, name);
@@ -1685,10 +1760,10 @@ async function createTour(
         }
     }
 
-    const meals: any[] = [];
+    const tourMeals: any[] = [];
     if (tourData.meals) {
         for (const meal of tourData.meals) {
-            meals.push({
+            tourMeals.push({
                 id: null,
                 name: meal.name,
                 vendor_id: 2,
@@ -1894,7 +1969,7 @@ async function createTour(
         child_price: tourData.child_price?.toString() || null,
         commission_child_type: 1,
         commission_child_sum: null,
-        meals: meals,
+        meals: tourMeals,
         status: 1,
         category_id: category?.pazl_id || null,
         transport_forth_id: transportForth?.pazl_id || null
