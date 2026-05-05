@@ -24,7 +24,7 @@
           <div class="card-icon">🔄</div>
           <h3>Перенос с Avianna</h3>
           <p>Импорт туров из системы Avianna</p>
-          <div class="card-badge soon">Скоро</div>
+          <div class="card-badge soon" style="background-color: #ffeb3b !important; color: #0f0f0f">BETA</div>
         </div>
 
         <div class="action-card" @click="navigateTo('/import-site')">

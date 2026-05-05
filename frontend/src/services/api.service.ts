@@ -1,5 +1,12 @@
 import axios from 'axios';
-import type { LoginResponse, TourStatus, CreateTourData, ApiResponse } from '../types';
+import type {
+    LoginResponse,
+    TourStatus,
+    CreateTourData,
+    ApiResponse,
+    MigrationRequest,
+    MigrationResponse
+} from '../types';
 import { config } from '../config';
 
 const API_BASE_URL = `${config.apiUrl}/api`;
@@ -52,6 +59,21 @@ class ApiService {
     createEventSource(sessionId: string): EventSource {
         const url = `${API_BASE_URL}/tours/stream/${sessionId}`;
         return new EventSource(url, { withCredentials: true });
+    }
+
+    // Новый метод для миграции
+    async startMigration(data: MigrationRequest): Promise<MigrationResponse> {
+        const response = await axios.post<MigrationResponse>(
+            `${API_BASE_URL}/migrate`,
+            data,
+            { withCredentials: true }
+        );
+
+        if (!response.data.success) {
+            throw new Error(response.data.error || 'Ошибка миграции');
+        }
+
+        return response.data;
     }
 }
 

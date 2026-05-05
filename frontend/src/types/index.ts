@@ -38,3 +38,55 @@ export interface CreateTourData {
     email: string;
     password: string;
 }
+
+// Новые типы для миграции
+export interface MigrationRequest {
+    aviannaEmail: string;
+    aviannaPassword: string;
+    pazlEmail: string;
+    pazlPassword: string;
+    tourName: string;
+}
+
+export interface MappedEntity {
+    source_id: number;
+    source_name: string;
+    source_type?: string;
+    pazl_id: number | null;
+    pazl_name: string | null;
+    needs_creation: boolean;
+}
+
+export interface MigrationMappings {
+    cities: MappedEntity[];
+    transportations: MappedEntity[];
+    transports: MappedEntity[];
+    hotel_meals: MappedEntity[];
+    hotel_accommodations: MappedEntity[];
+    hotel_infrastructure_types: MappedEntity[];
+    hotel_infrastructures: MappedEntity[];
+    room_types: MappedEntity[];
+    room_places: MappedEntity[];
+    room_descriptions: MappedEntity[];
+    hotels: MappedEntity[];
+    tour_categories: MappedEntity[];
+    tour_services: MappedEntity[];
+    catalog_sections: MappedEntity[];
+}
+
+export interface MigrationResult {
+    tourData: any;
+    mappings: MigrationMappings;
+    stats: {
+        totalToCreate: number;
+        totalExists: number;
+        total: number;
+    };
+    message: string;
+}
+
+export interface MigrationResponse {
+    success: boolean;
+    data?: MigrationResult;
+    error?: string;
+}
