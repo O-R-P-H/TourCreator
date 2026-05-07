@@ -41,12 +41,20 @@ const sessions = new Map<string, {
 
 function sendSSE(sessionId: string, event: string, data: any) {
     const session = sessions.get(sessionId);
-    if (session && session.res) {
-        try {
-            session.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-        } catch (e) {
-            console.log('SSE send error:', e);
-        }
+    if (!session) {
+        console.log(`⚠️ SSE: сессия ${sessionId} не найдена`);
+        return;
+    }
+    if (!session.res) {
+        console.log(`⚠️ SSE: res отсутствует для сессии ${sessionId}, event: ${event}`);
+        return;
+    }
+    try {
+        const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+        session.res.write(msg);
+        console.log(`📤 SSE отправлено [${sessionId}]: ${event}`);
+    } catch (e) {
+        console.log(`❌ SSE send error [${sessionId}]:`, e);
     }
 }
 
