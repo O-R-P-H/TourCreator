@@ -61,12 +61,12 @@ class ApiService {
         return new EventSource(url, { withCredentials: true });
     }
 
-    // Новый метод для миграции
+    // Старый метод для прямой миграции (без SSE)
     async startMigration(data: MigrationRequest): Promise<MigrationResponse> {
         const response = await axios.post<MigrationResponse>(
             `${API_BASE_URL}/migrate`,
             data,
-            { withCredentials: true }
+            { withCredentials: true, timeout: 300000 }
         );
 
         if (!response.data.success) {
@@ -74,6 +74,27 @@ class ApiService {
         }
 
         return response.data;
+    }
+
+    // Новый метод - запуск миграции и получение sessionId
+    async startMigrationSession(data: MigrationRequest): Promise<{ sessionId: string }> {
+        const response = await axios.post<ApiResponse<{ sessionId: string }>>(
+            `${API_BASE_URL}/migrate/start`,
+            data,
+            { withCredentials: true }
+        );
+
+        if (!response.data.success || !response.data.data) {
+            throw new Error(response.data.error || 'Ошибка запуска миграции');
+        }
+
+        return response.data.data;
+    }
+
+    // Новый метод - создание SSE стрима для миграции
+    createMigrationEventSource(sessionId: string): EventSource {
+        const url = `${API_BASE_URL}/migrate/stream/${sessionId}`;
+        return new EventSource(url, { withCredentials: true });
     }
 }
 

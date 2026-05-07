@@ -17,7 +17,6 @@
             Введите данные для доступа к обоим аккаунтам и название тура для переноса
           </p>
 
-          <!-- Информация о процессе -->
           <div class="info-box">
             <h4>📋 Процесс миграции:</h4>
             <ol>
@@ -100,15 +99,11 @@
           <div v-if="error" class="error-block">
             <div class="error-header">❌ Ошибка</div>
             <div class="error-message">{{ error }}</div>
-            <div v-if="errorDetails" class="error-details">
-              <div class="error-details-title">Подробности:</div>
-              <pre>{{ errorDetails }}</pre>
-            </div>
           </div>
         </div>
       </div>
 
-      <!-- Прогресс миграции -->
+      <!-- Прогресс миграции (SSE) -->
       <div v-if="migrationStarted && !result" class="progress-section">
         <div class="progress-container">
           <h2>🔄 Идёт миграция...</h2>
@@ -152,6 +147,10 @@
             </div>
             <div class="progress-text">{{ progressPercent }}%</div>
           </div>
+
+          <div v-if="hasError" class="error-actions">
+            <button @click="resetForm" class="reset-btn">🔄 Вернуться к форме</button>
+          </div>
         </div>
       </div>
 
@@ -177,7 +176,7 @@
             </div>
             <div class="stat-card create">
               <div class="stat-value">{{ result.stats.totalToCreate }}</div>
-              <div class="stat-label">Требуется создать</div>
+              <div class="stat-label">Требовалось создать</div>
             </div>
             <div class="stat-card created">
               <div class="stat-value">{{ result.stats.created }}</div>
@@ -185,25 +184,36 @@
             </div>
           </div>
 
+          <!-- Статус создания -->
+          <div v-if="result.stats.totalToCreate > 0" class="creation-status" :class="result.stats.created === result.stats.totalToCreate ? 'all-created' : 'partial-created'">
+            <span v-if="result.stats.created === result.stats.totalToCreate">✅ Все необходимые сущности успешно созданы</span>
+            <span v-else-if="result.stats.created > 0">⚠️ Создано {{ result.stats.created }} из {{ result.stats.totalToCreate }} сущностей</span>
+            <span v-else>ℹ️ Сущности не были созданы (возможно они уже существуют)</span>
+          </div>
+
           <!-- Созданные сущности -->
           <div v-if="result.createdEntities && result.createdEntities.length > 0" class="section-block">
             <h3>🆕 Созданные сущности ({{ result.createdEntities.length }})</h3>
             <div class="entities-grid">
               <div
-                  v-for="entity in result.createdEntities"
-                  :key="entity.pazl_id + entity.type"
+                  v-for="(entity, index) in result.createdEntities"
+                  :key="`${entity.type}_${entity.pazl_id}_${index}`"
                   class="entity-card"
               >
                 <div class="entity-type">{{ getEntityTypeLabel(entity.type) }}</div>
                 <div class="entity-name">{{ entity.source_name }}</div>
-                <div class="entity-id">ID: {{ entity.pazl_id }}</div>
+                <div class="entity-id">ID в Pazl: {{ entity.pazl_id }}</div>
               </div>
             </div>
           </div>
 
           <!-- Детали маппинга -->
           <div class="section-block">
-            <h3>📊 Детали маппинга</h3>
+            <h3>
+              📊 Детали маппинга
+              <span class="section-badge">Найдено: {{ result.stats.totalExists }}</span>
+              <span v-if="result.stats.totalToCreate > 0" class="section-badge warning">Создано: {{ result.stats.totalToCreate }}</span>
+            </h3>
 
             <div class="mappings-detail">
               <div
@@ -213,19 +223,22 @@
               >
                 <div v-if="items && items.length > 0" class="category-section">
                   <h4 class="category-title">
-                    {{ getCategoryName(category as string) }}
+                    {{ getCategoryName(String(category)) }}
                     <span class="badge">{{ items.length }}</span>
                     <span v-if="getCategoryStats(items).toCreate > 0" class="badge warning">
                       ⚠️ {{ getCategoryStats(items).toCreate }}
+                    </span>
+                    <span v-if="getCategoryStats(items).toCreate === 0 && items.length > 0" class="badge success">
+                      ✓
                     </span>
                   </h4>
 
                   <div class="mapping-items">
                     <div
-                        v-for="item in items"
-                        :key="`${item.source_id}-${item.source_name}`"
+                        v-for="(item, itemIndex) in items"
+                        :key="`${item.source_id}_${item.source_name}_${itemIndex}`"
                         class="mapping-item"
-                        :class="{ 'needs-creation': item.needs_creation }"
+                        :class="{ 'needs-creation': item.needs_creation, 'is-found': !item.needs_creation }"
                     >
                       <div class="item-name">{{ item.source_name }}</div>
                       <div class="item-status">
@@ -255,6 +268,12 @@
                 <span class="label">ID в Avianna:</span>
                 <span class="value">{{ result.tourData.id }}</span>
               </div>
+              <div class="tour-info-item">
+                <span class="label">Статус создания:</span>
+                <span class="value" :class="result.tourCreated ? 'text-success' : 'text-warning'">
+                  {{ result.tourCreated ? '✅ Успешно создан в Pazl Tours' : '❌ Не создан' }}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -263,7 +282,7 @@
             <button @click="resetForm" class="new-migration-btn">
               🔄 Новая миграция
             </button>
-            <button @click="goBack" class="back-btn">
+            <button @click="goBack" class="back-btn-secondary">
               ← На главную
             </button>
           </div>
@@ -283,7 +302,6 @@ const router = useRouter();
 
 const loading = ref(false);
 const error = ref('');
-const errorDetails = ref('');
 const migrationStarted = ref(false);
 const result = ref<MigrationResult | null>(null);
 const progressPercent = ref(0);
@@ -303,6 +321,10 @@ const steps = reactive<Step[]>([
   { title: 'Создание недостающих сущностей', status: 'pending', message: '' },
   { title: 'Создание тура в Pazl Tours', status: 'pending', message: '' },
 ]);
+
+const hasError = computed(() => {
+  return steps.some(step => step.status === 'error');
+});
 
 const form = ref({
   aviannaEmail: '',
@@ -362,13 +384,18 @@ const getEntityTypeLabel = (type: string): string => {
 
 const getCategoryStats = (items: any[]) => {
   const toCreate = items.filter((i: any) => i.needs_creation).length;
-  return { toCreate };
+  const exists = items.filter((i: any) => !i.needs_creation).length;
+  return { toCreate, exists };
 };
 
-const updateStep = (index: number, status: Step['status'], message: string, error?: string) => {
-  steps[index].status = status;
-  steps[index].message = message;
-  if (error) steps[index].error = error;
+const updateStep = (stepIndex: number, status: Step['status'], message: string, errMsg?: string) => {
+  if (stepIndex >= 0 && stepIndex < steps.length) {
+    steps[stepIndex].status = status;
+    steps[stepIndex].message = message;
+    if (errMsg) {
+      steps[stepIndex].error = errMsg;
+    }
+  }
 
   // Обновляем прогресс
   const completedSteps = steps.filter(s => s.status === 'completed').length;
@@ -390,98 +417,97 @@ const startMigration = async () => {
 
   loading.value = true;
   error.value = '';
-  errorDetails.value = '';
   migrationStarted.value = true;
   result.value = null;
   resetSteps();
 
   try {
-    // Шаг 1: Вход в Avianna
-    updateStep(0, 'active', 'Выполняется вход в Avianna...');
-    await delay(500);
+    // Запускаем миграцию и получаем sessionId
+    updateStep(0, 'active', 'Запуск миграции...');
 
-    // Шаг 2: Поиск тура
-    updateStep(0, 'completed', 'Вход выполнен успешно');
-    updateStep(1, 'active', 'Поиск и загрузка данных тура из Avianna...');
-    await delay(500);
+    const { sessionId } = await apiService.startMigrationSession(form.value);
+    console.log('Session ID:', sessionId);
 
-    // Шаг 3: Вход в Pazl
-    updateStep(1, 'completed', 'Тур найден и загружен');
-    updateStep(2, 'active', 'Выполняется вход в Pazl Tours...');
-    await delay(500);
+    // Подключаемся к SSE стриму
+    const eventSource = apiService.createMigrationEventSource(sessionId);
 
-    // Шаг 4: Маппинг
-    updateStep(2, 'completed', 'Вход выполнен успешно');
-    updateStep(3, 'active', 'Поиск соответствий между Avianna и Pazl Tours...');
+    eventSource.addEventListener('connected', (event) => {
+      console.log('SSE connected:', JSON.parse(event.data));
+    });
 
-    const response = await apiService.startMigration(form.value);
+    // Слушаем события шагов
+    eventSource.addEventListener('step', (event) => {
+      const data = JSON.parse(event.data);
+      console.log('Step event:', data);
+      updateStep(data.step, data.status, data.message);
+    });
 
-    updateStep(3, 'completed', 'Соответствия найдены');
+    // Слушаем ошибки
+    eventSource.addEventListener('error', (event) => {
+      const data = JSON.parse(event.data);
+      console.error('SSE error:', data);
+      error.value = data.message || 'Ошибка миграции';
+      loading.value = false;
+      eventSource.close();
+    });
 
-    // Шаг 5: Создание сущностей
-    if (response.data) {
-      const data = response.data;
+    // Слушаем финальный результат
+    eventSource.addEventListener('result', (event) => {
+      const data = JSON.parse(event.data);
+      console.log('Result:', data);
 
-      if (data.stats.totalToCreate > 0) {
-        updateStep(4, 'active', `Создание ${data.stats.totalToCreate} недостающих сущностей...`);
-        await delay(500);
-        updateStep(4, 'completed', `Создано ${data.stats.created} из ${data.stats.totalToCreate} сущностей`);
-      } else {
-        updateStep(4, 'completed', 'Все сущности уже существуют, создание не требуется');
+      if (data.success && data.data) {
+        result.value = data.data;
+        progressPercent.value = 100;
+
+        // Обновляем последние шаги на основе реальных данных
+        const res = data.data;
+
+        if (res.stats.totalToCreate > 0) {
+          if (res.stats.created === res.stats.totalToCreate) {
+            updateStep(4, 'completed', `✅ Создано ${res.stats.created} сущностей`);
+          } else if (res.stats.created > 0) {
+            updateStep(4, 'completed', `⚠️ Создано ${res.stats.created} из ${res.stats.totalToCreate}`);
+          }
+        } else {
+          updateStep(4, 'completed', 'Все сущности уже существуют');
+        }
+
+        if (res.tourCreated) {
+          updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours!');
+        } else {
+          updateStep(5, 'error', '❌ Тур не был создан', res.message);
+        }
       }
 
-      // Шаг 6: Создание тура
-      if (data.tourCreated) {
-        updateStep(5, 'completed', 'Тур успешно создан в Pazl Tours!');
+      loading.value = false;
+      eventSource.close();
+    });
+
+    // Обработка обрыва соединения
+    eventSource.onerror = (err) => {
+      console.error('SSE connection error:', err);
+      if (eventSource.readyState === EventSource.CLOSED) {
+        // Соединение закрыто сервером - это нормально после result
+        console.log('SSE connection closed');
       } else {
-        updateStep(5, 'error', 'Не удалось создать тур', data.message);
+        error.value = 'Потеряно соединение с сервером';
+        loading.value = false;
+        eventSource.close();
       }
-
-      progressPercent.value = 100;
-
-      // Небольшая задержка чтобы пользователь увидел все галочки
-      await delay(1000);
-
-      result.value = data;
-    }
+    };
 
   } catch (err: any) {
-    console.error('Migration error:', err);
-
-    // Определяем на каком шаге ошибка
-    const errorMsg = err.response?.data?.error || err.message || 'Неизвестная ошибка';
-
-    if (errorMsg.includes('Avianna') || errorMsg.includes('avianna')) {
-      updateStep(0, 'error', 'Ошибка входа в Avianna', errorMsg);
-      updateStep(1, 'pending', '');
-      updateStep(2, 'pending', '');
-    } else if (errorMsg.includes('не найден') || errorMsg.includes('404')) {
-      updateStep(0, 'completed', 'Вход выполнен');
-      updateStep(1, 'error', 'Тур не найден', errorMsg);
-    } else if (errorMsg.includes('Pazl') || errorMsg.includes('pazl')) {
-      updateStep(0, 'completed', 'Вход выполнен');
-      updateStep(1, 'completed', 'Тур загружен');
-      updateStep(2, 'error', 'Ошибка входа в Pazl Tours', errorMsg);
-    } else if (errorMsg.includes('timeout') || errorMsg.includes('таймаут')) {
-      updateStep(3, 'error', 'Превышено время ожидания', errorMsg);
-    } else {
-      // Общая ошибка
-      updateStep(3, 'error', 'Ошибка выполнения', errorMsg);
-    }
-
-    error.value = errorMsg;
-    errorDetails.value = JSON.stringify(err.response?.data || err, null, 2);
-    migrationStarted.value = false;
-
-  } finally {
+    console.error('Migration start error:', err);
+    error.value = err.response?.data?.error || err.message || 'Ошибка запуска миграции';
     loading.value = false;
+    migrationStarted.value = false;
   }
 };
 
 const resetForm = () => {
   result.value = null;
   error.value = '';
-  errorDetails.value = '';
   migrationStarted.value = false;
   resetSteps();
   form.value = {
@@ -501,8 +527,6 @@ const logout = () => {
   localStorage.clear();
   router.push('/login');
 };
-
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 </script>
 
 <style scoped>
@@ -730,26 +754,6 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   line-height: 1.5;
 }
 
-.error-details {
-  margin-top: 12px;
-}
-
-.error-details-title {
-  color: #888;
-  font-size: 12px;
-  margin-bottom: 4px;
-}
-
-.error-details pre {
-  background: rgba(0, 0, 0, 0.3);
-  padding: 12px;
-  border-radius: 6px;
-  color: #aaa;
-  font-size: 11px;
-  overflow-x: auto;
-  max-height: 200px;
-}
-
 /* Прогресс */
 .progress-section {
   max-width: 700px;
@@ -856,12 +860,14 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   padding: 8px;
   background: rgba(220, 53, 69, 0.1);
   border-radius: 4px;
+  word-break: break-word;
 }
 
 .progress-bar-container {
   display: flex;
   align-items: center;
   gap: 16px;
+  margin-bottom: 24px;
 }
 
 .progress-bar {
@@ -884,6 +890,25 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   font-size: 14px;
   font-weight: 600;
   min-width: 40px;
+}
+
+.error-actions {
+  text-align: center;
+}
+
+.reset-btn {
+  padding: 10px 24px;
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.reset-btn:hover {
+  background: #c82333;
 }
 
 /* Результаты */
@@ -920,6 +945,26 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 .result-message {
   color: #888;
   font-size: 16px;
+}
+
+.creation-status {
+  text-align: center;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 32px;
+  font-size: 14px;
+}
+
+.creation-status.all-created {
+  background: rgba(40, 167, 69, 0.1);
+  border: 1px solid rgba(40, 167, 69, 0.3);
+  color: #28a745;
+}
+
+.creation-status.partial-created {
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  color: #ffc107;
 }
 
 .stats-container {
@@ -961,6 +1006,24 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   color: #ffffff;
   font-size: 20px;
   margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.section-badge {
+  background: #333;
+  color: #aaa;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: normal;
+}
+
+.section-badge.warning {
+  background: rgba(255, 193, 7, 0.2);
+  color: #ffc107;
 }
 
 .entities-grid {
@@ -987,6 +1050,7 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   color: #fff;
   font-size: 14px;
   margin-bottom: 4px;
+  word-break: break-word;
 }
 
 .entity-id {
@@ -1025,6 +1089,11 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   color: #ffc107;
 }
 
+.badge.success {
+  background: rgba(40, 167, 69, 0.2);
+  color: #28a745;
+}
+
 .mapping-items {
   display: grid;
   gap: 6px;
@@ -1045,13 +1114,20 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   background: rgba(255, 193, 7, 0.05);
 }
 
+.mapping-item.is-found {
+  border-color: rgba(40, 167, 69, 0.2);
+}
+
 .item-name {
   color: #fff;
   font-size: 13px;
+  word-break: break-word;
 }
 
 .item-status {
   font-size: 12px;
+  flex-shrink: 0;
+  margin-left: 12px;
 }
 
 .found {
@@ -1083,12 +1159,20 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 .tour-info-item .label {
   color: #888;
   font-size: 14px;
-  min-width: 120px;
+  min-width: 140px;
 }
 
 .tour-info-item .value {
   color: #fff;
   font-size: 14px;
+}
+
+.tour-info-item .text-success {
+  color: #28a745;
+}
+
+.tour-info-item .text-warning {
+  color: #dc3545;
 }
 
 .results-actions {
@@ -1113,6 +1197,23 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   background: #0056b3;
 }
 
+.back-btn-secondary {
+  padding: 12px 32px;
+  background: transparent;
+  color: #aaa;
+  border: 1px solid #444;
+  border-radius: 8px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.back-btn-secondary:hover {
+  background: #2a2a2a;
+  color: #fff;
+  border-color: #666;
+}
+
 /* Скроллбар */
 .mappings-detail::-webkit-scrollbar {
   width: 6px;
@@ -1130,5 +1231,24 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 .mappings-detail::-webkit-scrollbar-thumb:hover {
   background: #555;
+}
+
+/* Адаптивность */
+@media (max-width: 768px) {
+  .stats-container {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .entities-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .results-actions {
+    flex-direction: column;
+  }
 }
 </style>
