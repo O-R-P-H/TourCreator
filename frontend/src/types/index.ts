@@ -39,7 +39,7 @@ export interface CreateTourData {
     password: string;
 }
 
-// Новые типы для миграции
+// Типы для миграции
 export interface MigrationRequest {
     aviannaEmail: string;
     aviannaPassword: string;
@@ -68,25 +68,43 @@ export interface MigrationMappings {
     room_types: MappedEntity[];
     room_places: MappedEntity[];
     room_descriptions: MappedEntity[];
+    room_services: MappedEntity[];
+    room_equipments: MappedEntity[];
+    room_furnitures: MappedEntity[];
+    room_bathrooms: MappedEntity[];
     hotels: MappedEntity[];
     tour_categories: MappedEntity[];
     tour_services: MappedEntity[];
     catalog_sections: MappedEntity[];
 }
 
-export interface MigrationResult {
-    tourData: any;
-    mappings: MigrationMappings;
-    stats: {
-        totalToCreate: number;
-        totalExists: number;
-        total: number;
+export interface CreatedEntity {
+    type: string;
+    source_name: string;
+    pazl_id: number;
+}
+
+export interface MigrationStats {
+    totalToCreate: number;
+    totalExists: number;
+    total: number;
+    created: number;
+}
+
+export interface MigrationResultData {
+    tourData: {
+        id: number;
+        name: string;
     };
+    mappings: MigrationMappings;
+    createdEntities: CreatedEntity[];
+    stats: MigrationStats;
+    tourCreated: boolean;
     message: string;
 }
 
 export interface MigrationResponse {
     success: boolean;
-    data?: MigrationResult;
+    data?: MigrationResultData;
     error?: string;
 }

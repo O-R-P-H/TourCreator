@@ -225,10 +225,10 @@
                   <h4 class="category-title">
                     {{ getCategoryName(String(category)) }}
                     <span class="badge">{{ items.length }}</span>
-                    <span v-if="getCategoryStats(items).toCreate > 0" class="badge warning">
+                    <span v-if="items && getCategoryStats(items).toCreate > 0" class="badge warning">
                       ⚠️ {{ getCategoryStats(items).toCreate }}
                     </span>
-                    <span v-if="getCategoryStats(items).toCreate === 0 && items.length > 0" class="badge success">
+                    <span v-if="items && getCategoryStats(items).toCreate === 0 && items.length > 0" class="badge success">
                       ✓
                     </span>
                   </h4>
@@ -296,14 +296,14 @@
 import { ref, computed, reactive } from 'vue';
 import { useRouter } from 'vue-router';
 import apiService from '@/services/api.service';
-import type { MigrationResult } from '@/types';
+import type { MigrationResultData, MappedEntity } from '@/types';
 
 const router = useRouter();
 
 const loading = ref(false);
 const error = ref('');
 const migrationStarted = ref(false);
-const result = ref<MigrationResult | null>(null);
+const result = ref<MigrationResultData | null>(null);
 const progressPercent = ref(0);
 
 interface Step {
@@ -335,11 +335,11 @@ const form = ref({
 });
 
 const isFormValid = computed(() => {
-  return form.value.aviannaEmail &&
+  return !!(form.value.aviannaEmail &&
       form.value.aviannaPassword &&
       form.value.pazlEmail &&
       form.value.pazlPassword &&
-      form.value.tourName;
+      form.value.tourName);
 });
 
 const categoryNames: Record<string, string> = {
@@ -374,45 +374,53 @@ const entityTypeLabels: Record<string, string> = {
   hotel: '🏨 Гостиница'
 };
 
-const getCategoryName = (key: string): string => {
+function getCategoryName(key: string): string {
   return categoryNames[key] || key;
-};
+}
 
-const getEntityTypeLabel = (type: string): string => {
+function getEntityTypeLabel(type: string): string {
   return entityTypeLabels[type] || type;
-};
+}
 
-const getCategoryStats = (items: any[]) => {
-  const toCreate = items.filter((i: any) => i.needs_creation).length;
-  const exists = items.filter((i: any) => !i.needs_creation).length;
-  return { toCreate, exists };
-};
-
-const updateStep = (stepIndex: number, status: Step['status'], message: string, errMsg?: string) => {
-  if (stepIndex >= 0 && stepIndex < steps.length) {
-    steps[stepIndex].status = status;
-    steps[stepIndex].message = message;
-    if (errMsg) {
-      steps[stepIndex].error = errMsg;
-    }
+function getCategoryStats(items: MappedEntity[]): { toCreate: number; exists: number } {
+  if (!items || !Array.isArray(items)) {
+    return { toCreate: 0, exists: 0 };
   }
+  const toCreate = items.filter((i) => i.needs_creation).length;
+  const exists = items.filter((i) => !i.needs_creation).length;
+  return { toCreate, exists };
+}
 
-  // Обновляем прогресс
+function updateProgress(): void {
   const completedSteps = steps.filter(s => s.status === 'completed').length;
   const totalSteps = steps.length;
-  progressPercent.value = Math.round((completedSteps / totalSteps) * 100);
-};
+  progressPercent.value = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
+}
 
-const resetSteps = () => {
+function updateStep(stepIndex: number, status: Step['status'], message: string, errMsg?: string): void {
+  if (stepIndex >= 0 && stepIndex < steps.length) {
+    const step = steps[stepIndex];
+    if (step) {
+      step.status = status;
+      step.message = message;
+      if (errMsg) {
+        step.error = errMsg;
+      }
+    }
+  }
+  updateProgress();
+}
+
+function resetSteps(): void {
   steps.forEach(step => {
     step.status = 'pending';
     step.message = '';
     step.error = '';
   });
-  progressPercent.value = 0;
-};
+  updateProgress();
+}
 
-const startMigration = async () => {
+async function startMigration(): Promise<void> {
   if (!isFormValid.value) return;
 
   loading.value = true;
@@ -422,56 +430,43 @@ const startMigration = async () => {
   resetSteps();
 
   try {
-    // Запускаем миграцию и получаем sessionId
     updateStep(0, 'active', 'Запуск миграции...');
 
     const { sessionId } = await apiService.startMigrationSession(form.value);
     console.log('Session ID:', sessionId);
 
-    // Подключаемся к SSE стриму
     const eventSource = apiService.createMigrationEventSource(sessionId);
 
-    eventSource.addEventListener('connected', (event) => {
-      console.log('SSE connected:', JSON.parse(event.data));
+    eventSource.addEventListener('connected', (event: Event) => {
+      const messageEvent = event as MessageEvent;
+      console.log('SSE connected:', JSON.parse(messageEvent.data));
     });
 
-    // Слушаем события шагов
-    eventSource.addEventListener('step', (event) => {
-      const data = JSON.parse(event.data);
+    eventSource.addEventListener('step', (event: Event) => {
+      const messageEvent = event as MessageEvent;
+      const data = JSON.parse(messageEvent.data);
       console.log('Step event:', data);
-      updateStep(data.step, data.status, data.message);
+      updateStep(data.step, data.status, data.message, data.error);
     });
 
-    // Слушаем ошибки
-    eventSource.addEventListener('error', (event) => {
-      const data = JSON.parse(event.data);
+    eventSource.addEventListener('error', (event: Event) => {
+      const messageEvent = event as MessageEvent;
+      const data = JSON.parse(messageEvent.data);
       console.error('SSE error:', data);
       error.value = data.message || 'Ошибка миграции';
       loading.value = false;
       eventSource.close();
     });
 
-    // Слушаем финальный результат
-    eventSource.addEventListener('result', (event) => {
-      const data = JSON.parse(event.data);
+    eventSource.addEventListener('result', (event: Event) => {
+      const messageEvent = event as MessageEvent;
+      const data = JSON.parse(messageEvent.data);
       console.log('Result:', data);
 
       if (data.success && data.data) {
-        result.value = data.data;
+        const res = data.data as MigrationResultData;
+        result.value = res;
         progressPercent.value = 100;
-
-        // Обновляем последние шаги на основе реальных данных
-        const res = data.data;
-
-        if (res.stats.totalToCreate > 0) {
-          if (res.stats.created === res.stats.totalToCreate) {
-            updateStep(4, 'completed', `✅ Создано ${res.stats.created} сущностей`);
-          } else if (res.stats.created > 0) {
-            updateStep(4, 'completed', `⚠️ Создано ${res.stats.created} из ${res.stats.totalToCreate}`);
-          }
-        } else {
-          updateStep(4, 'completed', 'Все сущности уже существуют');
-        }
 
         if (res.tourCreated) {
           updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours!');
@@ -484,12 +479,10 @@ const startMigration = async () => {
       eventSource.close();
     });
 
-    // Обработка обрыва соединения
-    eventSource.onerror = (err) => {
-      console.error('SSE connection error:', err);
+    eventSource.onerror = (): void => {
+      console.error('SSE connection error, readyState:', eventSource.readyState);
       if (eventSource.readyState === EventSource.CLOSED) {
-        // Соединение закрыто сервером - это нормально после result
-        console.log('SSE connection closed');
+        console.log('SSE connection closed normally');
       } else {
         error.value = 'Потеряно соединение с сервером';
         loading.value = false;
@@ -503,9 +496,9 @@ const startMigration = async () => {
     loading.value = false;
     migrationStarted.value = false;
   }
-};
+}
 
-const resetForm = () => {
+function resetForm(): void {
   result.value = null;
   error.value = '';
   migrationStarted.value = false;
@@ -517,16 +510,16 @@ const resetForm = () => {
     pazlPassword: '',
     tourName: ''
   };
-};
+}
 
-const goBack = () => {
+function goBack(): void {
   router.push('/');
-};
+}
 
-const logout = () => {
+function logout(): void {
   localStorage.clear();
   router.push('/login');
-};
+}
 </script>
 
 <style scoped>
