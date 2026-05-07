@@ -164,7 +164,6 @@
             <p class="result-message">{{ result.message }}</p>
           </div>
 
-          <!-- Статистика -->
           <div class="stats-container">
             <div class="stat-card total">
               <div class="stat-value">{{ result.stats.total }}</div>
@@ -184,14 +183,6 @@
             </div>
           </div>
 
-          <!-- Статус создания -->
-          <div v-if="result.stats.totalToCreate > 0" class="creation-status" :class="result.stats.created === result.stats.totalToCreate ? 'all-created' : 'partial-created'">
-            <span v-if="result.stats.created === result.stats.totalToCreate">✅ Все необходимые сущности успешно созданы</span>
-            <span v-else-if="result.stats.created > 0">⚠️ Создано {{ result.stats.created }} из {{ result.stats.totalToCreate }} сущностей</span>
-            <span v-else>ℹ️ Сущности не были созданы (возможно они уже существуют)</span>
-          </div>
-
-          <!-- Созданные сущности -->
           <div v-if="result.createdEntities && result.createdEntities.length > 0" class="section-block">
             <h3>🆕 Созданные сущности ({{ result.createdEntities.length }})</h3>
             <div class="entities-grid">
@@ -207,14 +198,8 @@
             </div>
           </div>
 
-          <!-- Детали маппинга -->
           <div class="section-block">
-            <h3>
-              📊 Детали маппинга
-              <span class="section-badge">Найдено: {{ result.stats.totalExists }}</span>
-              <span v-if="result.stats.totalToCreate > 0" class="section-badge warning">Создано: {{ result.stats.totalToCreate }}</span>
-            </h3>
-
+            <h3>📊 Детали маппинга</h3>
             <div class="mappings-detail">
               <div
                   v-for="(items, category) in result.mappings"
@@ -225,14 +210,10 @@
                   <h4 class="category-title">
                     {{ getCategoryName(String(category)) }}
                     <span class="badge">{{ items.length }}</span>
-                    <span v-if="items && getCategoryStats(items).toCreate > 0" class="badge warning">
+                    <span v-if="getCategoryStats(items).toCreate > 0" class="badge warning">
                       ⚠️ {{ getCategoryStats(items).toCreate }}
                     </span>
-                    <span v-if="items && getCategoryStats(items).toCreate === 0 && items.length > 0" class="badge success">
-                      ✓
-                    </span>
                   </h4>
-
                   <div class="mapping-items">
                     <div
                         v-for="(item, itemIndex) in items"
@@ -256,7 +237,6 @@
             </div>
           </div>
 
-          <!-- Данные тура -->
           <div v-if="result.tourData" class="section-block">
             <h3>🎯 Данные тура</h3>
             <div class="tour-info">
@@ -277,7 +257,6 @@
             </div>
           </div>
 
-          <!-- Кнопки -->
           <div class="results-actions">
             <button @click="resetForm" class="new-migration-btn">
               🔄 Новая миграция
@@ -384,18 +363,16 @@ function getEntityTypeLabel(type: string): string {
 }
 
 function getCategoryStats(items: MappedEntity[]): { toCreate: number; exists: number } {
-  if (!items || !Array.isArray(items)) {
-    return { toCreate: 0, exists: 0 };
-  }
-  const toCreate = items.filter((i) => i.needs_creation).length;
-  const exists = items.filter((i) => !i.needs_creation).length;
-  return { toCreate, exists };
+  if (!items || !Array.isArray(items)) return { toCreate: 0, exists: 0 };
+  return {
+    toCreate: items.filter((i) => i.needs_creation).length,
+    exists: items.filter((i) => !i.needs_creation).length
+  };
 }
 
 function updateProgress(): void {
-  const completedSteps = steps.filter(s => s.status === 'completed').length;
-  const totalSteps = steps.length;
-  progressPercent.value = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
+  const completed = steps.filter(s => s.status === 'completed').length;
+  progressPercent.value = steps.length > 0 ? Math.round((completed / steps.length) * 100) : 0;
 }
 
 function updateStep(stepIndex: number, status: Step['status'], message: string, errMsg?: string): void {
@@ -404,9 +381,7 @@ function updateStep(stepIndex: number, status: Step['status'], message: string, 
     if (step) {
       step.status = status;
       step.message = message;
-      if (errMsg) {
-        step.error = errMsg;
-      }
+      if (errMsg) step.error = errMsg;
     }
   }
   updateProgress();
@@ -418,7 +393,7 @@ function resetSteps(): void {
     step.message = '';
     step.error = '';
   });
-  updateProgress();
+  progressPercent.value = 0;
 }
 
 async function startMigration(): Promise<void> {
@@ -436,89 +411,63 @@ async function startMigration(): Promise<void> {
     const { sessionId } = await apiService.startMigrationSession(form.value);
     console.log('Session ID:', sessionId);
 
-    const API_BASE_URL = config.apiUrl + '/api';
-    const streamUrl = `${API_BASE_URL}/migrate/stream/${sessionId}`;
-    console.log('SSE Stream URL:', streamUrl);
+    const streamUrl = `${config.apiUrl}/api/migrate/stream/${sessionId}`;
+    console.log('SSE URL:', streamUrl);
 
-    // Используем fetch с ReadableStream вместо EventSource
-    const response = await fetch(streamUrl, {
-      headers: {
-        'Accept': 'text/event-stream',
-        'Cache-Control': 'no-cache'
-      }
+    const eventSource = new EventSource(streamUrl, { withCredentials: true });
 
+    eventSource.addEventListener('connected', (event: Event) => {
+      const msgEvent = event as MessageEvent;
+      console.log('SSE connected:', JSON.parse(msgEvent.data));
     });
 
-    if (!response.ok || !response.body) {
-      throw new Error('Не удалось подключиться к стриму миграции');
-    }
+    eventSource.addEventListener('step', (event: Event) => {
+      const msgEvent = event as MessageEvent;
+      const data = JSON.parse(msgEvent.data);
+      console.log('Step event:', data);
+      updateStep(data.step, data.status, data.message, data.error);
+    });
 
-    console.log('SSE stream connected');
+    eventSource.addEventListener('error', (event: Event) => {
+      const msgEvent = event as MessageEvent;
+      const data = JSON.parse(msgEvent.data);
+      console.error('SSE error:', data);
+      error.value = data.message || 'Ошибка миграции';
+      loading.value = false;
+      eventSource.close();
+    });
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    eventSource.addEventListener('result', (event: Event) => {
+      const msgEvent = event as MessageEvent;
+      const data = JSON.parse(msgEvent.data);
+      console.log('Result:', data);
 
-    while (true) {
-      const { done, value } = await reader.read();
+      if (data.success && data.data) {
+        const res = data.data as MigrationResultData;
+        result.value = res;
+        progressPercent.value = 100;
 
-      if (done) {
-        console.log('SSE stream ended');
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      let currentEvent = '';
-      let currentData = '';
-
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.substring(7).trim();
-        } else if (line.startsWith('data: ')) {
-          currentData = line.substring(6);
-        } else if (line === '' && currentEvent && currentData) {
-          try {
-            const data = JSON.parse(currentData);
-            console.log('SSE event:', currentEvent, data);
-
-            if (currentEvent === 'connected') {
-              console.log('SSE connected:', data);
-            } else if (currentEvent === 'step') {
-              updateStep(data.step, data.status, data.message, data.error);
-            } else if (currentEvent === 'error') {
-              error.value = data.message || 'Ошибка миграции';
-              loading.value = false;
-              return;
-            } else if (currentEvent === 'result') {
-              if (data.success && data.data) {
-                const res = data.data as MigrationResultData;
-                result.value = res;
-                progressPercent.value = 100;
-
-                if (res.tourCreated) {
-                  updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours!');
-                } else {
-                  updateStep(5, 'error', '❌ Тур не был создан', res.message);
-                }
-              }
-              loading.value = false;
-              return;
-            }
-          } catch (e) {
-            console.log('SSE parse error:', e, currentData);
-          }
-
-          currentEvent = '';
-          currentData = '';
+        if (res.tourCreated) {
+          updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours!');
+        } else {
+          updateStep(5, 'error', '❌ Тур не был создан', res.message);
         }
       }
-    }
 
-    loading.value = false;
+      loading.value = false;
+      eventSource.close();
+    });
+
+    eventSource.onerror = (): void => {
+      console.error('SSE connection error, readyState:', eventSource.readyState);
+      if (eventSource.readyState === EventSource.CLOSED) {
+        console.log('SSE connection closed normally');
+      } else {
+        error.value = 'Потеряно соединение с сервером';
+        loading.value = false;
+        eventSource.close();
+      }
+    };
 
   } catch (err: any) {
     console.error('Migration start error:', err);
@@ -638,7 +587,6 @@ function logout(): void {
   color: #888;
   margin-bottom: 24px;
   font-size: 14px;
-  line-height: 1.5;
 }
 
 .info-box {
@@ -686,7 +634,6 @@ function logout(): void {
   color: #aaa;
   margin-bottom: 8px;
   font-size: 14px;
-  font-weight: 500;
 }
 
 .form-group input {
@@ -697,7 +644,6 @@ function logout(): void {
   border-radius: 8px;
   color: #ffffff;
   font-size: 14px;
-  transition: border-color 0.3s;
   box-sizing: border-box;
 }
 
@@ -708,7 +654,6 @@ function logout(): void {
 
 .form-group input:disabled {
   opacity: 0.6;
-  cursor: not-allowed;
 }
 
 .actions {
@@ -725,7 +670,6 @@ function logout(): void {
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.3s;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -772,7 +716,6 @@ function logout(): void {
 .error-message {
   color: #ff6b6b;
   font-size: 14px;
-  line-height: 1.5;
 }
 
 .progress-section {
@@ -816,22 +759,18 @@ function logout(): void {
   border-radius: 8px;
   background: #0f0f0f;
   border: 1px solid #333;
-  transition: all 0.3s;
 }
 
 .step-item.step-active {
   border-color: #007bff;
-  background: rgba(0, 123, 255, 0.05);
 }
 
 .step-item.step-completed {
   border-color: #28a745;
-  background: rgba(40, 167, 69, 0.05);
 }
 
 .step-item.step-error {
   border-color: #dc3545;
-  background: rgba(220, 53, 69, 0.05);
 }
 
 .step-indicator {
@@ -880,7 +819,6 @@ function logout(): void {
   padding: 8px;
   background: rgba(220, 53, 69, 0.1);
   border-radius: 4px;
-  word-break: break-word;
 }
 
 .progress-bar-container {
@@ -908,7 +846,6 @@ function logout(): void {
 .progress-text {
   color: #aaa;
   font-size: 14px;
-  font-weight: 600;
   min-width: 40px;
 }
 
@@ -924,11 +861,6 @@ function logout(): void {
   border-radius: 8px;
   font-size: 14px;
   cursor: pointer;
-  transition: background 0.3s;
-}
-
-.reset-btn:hover {
-  background: #c82333;
 }
 
 .results-section {
@@ -953,37 +885,12 @@ function logout(): void {
   margin-bottom: 12px;
 }
 
-.results-header h2.success {
-  color: #28a745;
-}
-
-.results-header h2.warning {
-  color: #ffc107;
-}
+.results-header h2.success { color: #28a745; }
+.results-header h2.warning { color: #ffc107; }
 
 .result-message {
   color: #888;
   font-size: 16px;
-}
-
-.creation-status {
-  text-align: center;
-  padding: 12px;
-  border-radius: 8px;
-  margin-bottom: 32px;
-  font-size: 14px;
-}
-
-.creation-status.all-created {
-  background: rgba(40, 167, 69, 0.1);
-  border: 1px solid rgba(40, 167, 69, 0.3);
-  color: #28a745;
-}
-
-.creation-status.partial-created {
-  background: rgba(255, 193, 7, 0.1);
-  border: 1px solid rgba(255, 193, 7, 0.3);
-  color: #ffc107;
 }
 
 .stats-container {
@@ -1007,15 +914,15 @@ function logout(): void {
   margin-bottom: 8px;
 }
 
-.stat-label {
-  color: #888;
-  font-size: 14px;
-}
-
 .stat-card.total .stat-value { color: #007bff; }
 .stat-card.exists .stat-value { color: #28a745; }
 .stat-card.create .stat-value { color: #ffc107; }
 .stat-card.created .stat-value { color: #17a2b8; }
+
+.stat-label {
+  color: #888;
+  font-size: 14px;
+}
 
 .section-block {
   margin-bottom: 32px;
@@ -1025,24 +932,6 @@ function logout(): void {
   color: #ffffff;
   font-size: 20px;
   margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.section-badge {
-  background: #333;
-  color: #aaa;
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: 13px;
-  font-weight: normal;
-}
-
-.section-badge.warning {
-  background: rgba(255, 193, 7, 0.2);
-  color: #ffc107;
 }
 
 .entities-grid {
@@ -1069,7 +958,6 @@ function logout(): void {
   color: #fff;
   font-size: 14px;
   margin-bottom: 4px;
-  word-break: break-word;
 }
 
 .entity-id {
@@ -1080,10 +968,6 @@ function logout(): void {
 .mappings-detail {
   max-height: 600px;
   overflow-y: auto;
-}
-
-.mapping-category {
-  margin-bottom: 16px;
 }
 
 .category-title {
@@ -1108,11 +992,6 @@ function logout(): void {
   color: #ffc107;
 }
 
-.badge.success {
-  background: rgba(40, 167, 69, 0.2);
-  color: #28a745;
-}
-
 .mapping-items {
   display: grid;
   gap: 6px;
@@ -1130,32 +1009,19 @@ function logout(): void {
 
 .mapping-item.needs-creation {
   border-color: rgba(255, 193, 7, 0.3);
-  background: rgba(255, 193, 7, 0.05);
-}
-
-.mapping-item.is-found {
-  border-color: rgba(40, 167, 69, 0.2);
 }
 
 .item-name {
   color: #fff;
   font-size: 13px;
-  word-break: break-word;
 }
 
 .item-status {
   font-size: 12px;
-  flex-shrink: 0;
-  margin-left: 12px;
 }
 
-.found {
-  color: #28a745;
-}
-
-.not-found {
-  color: #ffc107;
-}
+.found { color: #28a745; }
+.not-found { color: #ffc107; }
 
 .tour-info {
   background: #0f0f0f;
@@ -1171,9 +1037,7 @@ function logout(): void {
   border-bottom: 1px solid #222;
 }
 
-.tour-info-item:last-child {
-  border-bottom: none;
-}
+.tour-info-item:last-child { border-bottom: none; }
 
 .tour-info-item .label {
   color: #888;
@@ -1186,13 +1050,8 @@ function logout(): void {
   font-size: 14px;
 }
 
-.tour-info-item .text-success {
-  color: #28a745;
-}
-
-.tour-info-item .text-warning {
-  color: #dc3545;
-}
+.text-success { color: #28a745; }
+.text-warning { color: #dc3545; }
 
 .results-actions {
   display: flex;
@@ -1209,11 +1068,6 @@ function logout(): void {
   border-radius: 8px;
   font-size: 16px;
   cursor: pointer;
-  transition: background 0.3s;
-}
-
-.new-migration-btn:hover {
-  background: #0056b3;
 }
 
 .back-btn-secondary {
@@ -1224,48 +1078,5 @@ function logout(): void {
   border-radius: 8px;
   font-size: 16px;
   cursor: pointer;
-  transition: all 0.3s;
-}
-
-.back-btn-secondary:hover {
-  background: #2a2a2a;
-  color: #fff;
-  border-color: #666;
-}
-
-.mappings-detail::-webkit-scrollbar {
-  width: 6px;
-}
-
-.mappings-detail::-webkit-scrollbar-track {
-  background: #0f0f0f;
-  border-radius: 3px;
-}
-
-.mappings-detail::-webkit-scrollbar-thumb {
-  background: #444;
-  border-radius: 3px;
-}
-
-.mappings-detail::-webkit-scrollbar-thumb:hover {
-  background: #555;
-}
-
-@media (max-width: 768px) {
-  .stats-container {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .form-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .entities-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .results-actions {
-    flex-direction: column;
-  }
 }
 </style>
