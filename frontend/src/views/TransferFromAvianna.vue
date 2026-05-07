@@ -296,6 +296,7 @@
 import { ref, computed, reactive } from 'vue';
 import { useRouter } from 'vue-router';
 import apiService from '@/services/api.service';
+import { config } from '@/config';
 import type { MigrationResultData, MappedEntity } from '@/types';
 
 const router = useRouter();
@@ -435,60 +436,89 @@ async function startMigration(): Promise<void> {
     const { sessionId } = await apiService.startMigrationSession(form.value);
     console.log('Session ID:', sessionId);
 
-    const eventSource = apiService.createMigrationEventSource(sessionId);
+    const API_BASE_URL = config.apiUrl + '/api';
+    const streamUrl = `${API_BASE_URL}/migrate/stream/${sessionId}`;
+    console.log('SSE Stream URL:', streamUrl);
 
-    eventSource.addEventListener('connected', (event: Event) => {
-      const messageEvent = event as MessageEvent;
-      console.log('SSE connected:', JSON.parse(messageEvent.data));
+    // Используем fetch с ReadableStream вместо EventSource
+    const response = await fetch(streamUrl, {
+      headers: {
+        'Accept': 'text/event-stream',
+        'Cache-Control': 'no-cache'
+      },
+
     });
 
-    eventSource.addEventListener('step', (event: Event) => {
-      const messageEvent = event as MessageEvent;
-      const data = JSON.parse(messageEvent.data);
-      console.log('Step event:', data);
-      updateStep(data.step, data.status, data.message, data.error);
-    });
+    if (!response.ok || !response.body) {
+      throw new Error('Не удалось подключиться к стриму миграции');
+    }
 
-    eventSource.addEventListener('error', (event: Event) => {
-      const messageEvent = event as MessageEvent;
-      const data = JSON.parse(messageEvent.data);
-      console.error('SSE error:', data);
-      error.value = data.message || 'Ошибка миграции';
-      loading.value = false;
-      eventSource.close();
-    });
+    console.log('SSE stream connected');
 
-    eventSource.addEventListener('result', (event: Event) => {
-      const messageEvent = event as MessageEvent;
-      const data = JSON.parse(messageEvent.data);
-      console.log('Result:', data);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-      if (data.success && data.data) {
-        const res = data.data as MigrationResultData;
-        result.value = res;
-        progressPercent.value = 100;
+    while (true) {
+      const { done, value } = await reader.read();
 
-        if (res.tourCreated) {
-          updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours!');
-        } else {
-          updateStep(5, 'error', '❌ Тур не был создан', res.message);
+      if (done) {
+        console.log('SSE stream ended');
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      let currentEvent = '';
+      let currentData = '';
+
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          currentEvent = line.substring(7).trim();
+        } else if (line.startsWith('data: ')) {
+          currentData = line.substring(6);
+        } else if (line === '' && currentEvent && currentData) {
+          try {
+            const data = JSON.parse(currentData);
+            console.log('SSE event:', currentEvent, data);
+
+            if (currentEvent === 'connected') {
+              console.log('SSE connected:', data);
+            } else if (currentEvent === 'step') {
+              updateStep(data.step, data.status, data.message, data.error);
+            } else if (currentEvent === 'error') {
+              error.value = data.message || 'Ошибка миграции';
+              loading.value = false;
+              return;
+            } else if (currentEvent === 'result') {
+              if (data.success && data.data) {
+                const res = data.data as MigrationResultData;
+                result.value = res;
+                progressPercent.value = 100;
+
+                if (res.tourCreated) {
+                  updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours!');
+                } else {
+                  updateStep(5, 'error', '❌ Тур не был создан', res.message);
+                }
+              }
+              loading.value = false;
+              return;
+            }
+          } catch (e) {
+            console.log('SSE parse error:', e, currentData);
+          }
+
+          currentEvent = '';
+          currentData = '';
         }
       }
+    }
 
-      loading.value = false;
-      eventSource.close();
-    });
-
-    eventSource.onerror = (): void => {
-      console.error('SSE connection error, readyState:', eventSource.readyState);
-      if (eventSource.readyState === EventSource.CLOSED) {
-        console.log('SSE connection closed normally');
-      } else {
-        error.value = 'Потеряно соединение с сервером';
-        loading.value = false;
-        eventSource.close();
-      }
-    };
+    loading.value = false;
 
   } catch (err: any) {
     console.error('Migration start error:', err);
@@ -586,7 +616,6 @@ function logout(): void {
   padding: 40px;
 }
 
-/* Форма */
 .form-section {
   max-width: 1000px;
   margin: 0 auto;
@@ -725,7 +754,6 @@ function logout(): void {
   to { transform: rotate(360deg); }
 }
 
-/* Ошибки */
 .error-block {
   margin-top: 24px;
   padding: 16px;
@@ -747,7 +775,6 @@ function logout(): void {
   line-height: 1.5;
 }
 
-/* Прогресс */
 .progress-section {
   max-width: 700px;
   margin: 0 auto;
@@ -904,7 +931,6 @@ function logout(): void {
   background: #c82333;
 }
 
-/* Результаты */
 .results-section {
   max-width: 1200px;
   margin: 0 auto;
@@ -1207,7 +1233,6 @@ function logout(): void {
   border-color: #666;
 }
 
-/* Скроллбар */
 .mappings-detail::-webkit-scrollbar {
   width: 6px;
 }
@@ -1226,7 +1251,6 @@ function logout(): void {
   background: #555;
 }
 
-/* Адаптивность */
 @media (max-width: 768px) {
   .stats-container {
     grid-template-columns: repeat(2, 1fr);
