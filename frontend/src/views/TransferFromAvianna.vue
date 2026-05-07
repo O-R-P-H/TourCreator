@@ -445,8 +445,8 @@ async function startMigration(): Promise<void> {
       headers: {
         'Accept': 'text/event-stream',
         'Cache-Control': 'no-cache'
-      },
-      credentials: 'include'
+      }
+
     });
 
     if (!response.ok || !response.body) {
