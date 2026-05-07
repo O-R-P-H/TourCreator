@@ -253,25 +253,76 @@ async function extractTourData(api: AviannaApiClient, tourId: number): Promise<a
         }
     }
 
+    // Загружаем названия городов
+    console.log(`\n  🏙️ Загрузка названий городов...`);
+    result.city_names = {};
+    const cityIds = new Set<number>();
+
+    if (result.transport_forth?.routes) {
+        const routes = result.transport_forth.routes;
+        const addCityId = (point: any) => {
+            if (point?.point_city_id) cityIds.add(point.point_city_id);
+        };
+        addCityId(routes.start);
+        addCityId(routes.finish);
+        routes.intermediates?.forEach(addCityId);
+    }
+
+    result.hotels?.forEach((hotel: any) => {
+        if (hotel.city?.id) {
+            cityIds.add(hotel.city.id);
+        }
+    });
+
+    for (const cityId of cityIds) {
+        const cityName = await api.getCityById(cityId);
+        if (cityName) {
+            result.city_names[cityId] = cityName;
+            console.log(`    Город ID ${cityId}: ${cityName}`);
+        }
+    }
+    console.log(`  ✅ Загружено названий городов: ${Object.keys(result.city_names).length}`);
+
+    // Загружаем название категории
+    if (result.category_id) {
+        console.log(`\n  📁 Загрузка названия категории ID: ${result.category_id}...`);
+        const categoryName = await api.getCategoryName(result.category_id);
+        if (categoryName) {
+            result.category_name = categoryName;
+            console.log(`    ✅ Категория: ${categoryName}`);
+        } else {
+            result.category_name = 'Автобусные туры';
+            console.log(`    ⚠️ Категория не найдена, используется: ${result.category_name}`);
+        }
+    }
+
+    // Загружаем названия услуг
     const serviceIds = new Set<number>();
     [...(tour.services || []), ...(tour.required_services || []), ...(tour.additional_services || [])].forEach((s: any) => {
         if (s.id) serviceIds.add(s.id);
     });
 
     if (serviceIds.size > 0) {
-        console.log(`\n  🛠️ Загрузка информации об услугах (${serviceIds.size})`);
+        console.log(`\n  🛠️ Загрузка названий и данных услуг (${serviceIds.size})...`);
         result.services_data = {};
+        result.service_names = {};
 
         for (const serviceId of serviceIds) {
+            const serviceName = await api.getTourServiceName(serviceId);
+            if (serviceName) {
+                result.service_names[serviceId] = serviceName;
+                console.log(`    Услуга ID ${serviceId}: ${serviceName}`);
+            }
             const serviceData = await api.getTourServiceFull(serviceId);
             if (serviceData) {
                 result.services_data[serviceId] = serviceData;
-                console.log(`    ✅ Услуга ID ${serviceId}: ${serviceData.name || 'без названия'}`);
             }
         }
+        console.log(`  ✅ Загружено названий услуг: ${Object.keys(result.service_names).length}`);
+        console.log(`  ✅ Загружено данных услуг: ${Object.keys(result.services_data).length}`);
     }
 
-    console.log(`\n  ✅ Данные тура "${tour.name}" загружены полностью`);
+    console.log(`\n  ✅ Все данные тура "${tour.name}" загружены`);
     return result;
 }
 
@@ -1026,11 +1077,10 @@ async function loginToPazl(page: any, email: string, password: string): Promise<
 }
 
 // ============================================
-// МАППИНГ
+// МАППИНГ (ИСПОЛЬЗУЕТ ТОЛЬКО tourData, БЕЗ ЗАПРОСОВ К AVIANNA)
 // ============================================
 
 async function performMapping(
-    aviannaApi: AviannaApiClient,
     pazlApi: PazlApiClient,
     tourData: any
 ): Promise<any> {
@@ -1093,8 +1143,7 @@ async function performMapping(
         }
     };
 
-    // 1. Города
-    console.log('\n  🏙️ Сбор городов из данных тура...');
+    // 1. Города (из предзагруженных данных)
     const cityIds = new Set<number>();
     if (tourData.transport_forth?.routes) {
         const routes = tourData.transport_forth.routes;
@@ -1112,38 +1161,23 @@ async function performMapping(
         }
     });
 
-    console.log(`  Найдено уникальных городов: ${cityIds.size}`);
-
     if (cityIds.size > 0) {
-        console.log('  Получение названий городов и маппинг...');
+        console.log(`\n  🏙️ Города (${cityIds.size}):`);
         for (const cityId of cityIds) {
-            const hotelWithCity = tourData.hotels?.find((h: any) => h.city?.id === cityId);
-            if (hotelWithCity?.city?.name) {
-                await mapEntity(cityId, hotelWithCity.city.name,
+            // Используем предзагруженные названия из tourData.city_names
+            const cityName = tourData.city_names?.[cityId] ||
+                tourData.hotels?.find((h: any) => h.city?.id === cityId)?.city?.name;
+
+            if (cityName) {
+                await mapEntity(cityId, cityName,
                     (name) => pazlApi.findCity(name),
-                    mappings.cities, hotelWithCity.city.name);
+                    mappings.cities, cityName);
             } else {
-                const transportPoint = tourData.transport_forth?.routes;
-                let cityName = null;
-                if (transportPoint) {
-                    if (transportPoint.start?.point_city_id === cityId && transportPoint.start?.info) {
-                        cityName = transportPoint.start.info;
-                    } else if (transportPoint.finish?.point_city_id === cityId && transportPoint.finish?.info) {
-                        cityName = transportPoint.finish.info;
-                    } else {
-                        const intermediate = transportPoint.intermediates?.find((p: any) => p.point_city_id === cityId);
-                        if (intermediate?.info) cityName = intermediate.info;
-                    }
-                }
-                if (cityName) {
-                    await mapEntity(cityId, cityName,
-                        (name) => pazlApi.findCity(name),
-                        mappings.cities, cityName);
-                } else {
-                    console.log(`    ⚠️ Город ID ${cityId} - нет названия`);
-                }
+                console.log(`    ⚠️ Город ID ${cityId} - нет названия`);
             }
         }
+    } else {
+        console.log('\n  🏙️ Города: нет городов для маппинга');
     }
 
     // 2. Тип транспорта
@@ -1172,20 +1206,13 @@ async function performMapping(
             mappings.transports, t.name);
     }
 
-    // 4. Категория тура
+    // 4. Категория тура (из предзагруженных данных)
     if (tourData.category_id) {
         console.log('\n  📁 Категория тура:');
-        const categoryName = await aviannaApi.getCategoryName(tourData.category_id);
-        if (categoryName) {
-            await mapEntity(tourData.category_id, categoryName,
-                (name) => pazlApi.findTourCategory(name),
-                mappings.tour_categories, categoryName);
-        } else {
-            console.log(`    ⚠️ Категория не найдена, используем "Автобусные туры"`);
-            await mapEntity(tourData.category_id, 'Автобусные туры',
-                (name) => pazlApi.findTourCategory(name),
-                mappings.tour_categories, 'Автобусные туры');
-        }
+        const categoryName = tourData.category_name || 'Автобусные туры';
+        await mapEntity(tourData.category_id, categoryName,
+            (name) => pazlApi.findTourCategory(name),
+            mappings.tour_categories, categoryName);
     }
 
     // 5. Гостиницы
@@ -1217,15 +1244,14 @@ async function performMapping(
         }
     }
 
-    // 7. Услуги тура
+    // 7. Услуги тура (из предзагруженных service_names)
     const tourServicesToFind = new Map<number, any>();
 
     if (tourData.services) {
-        console.log('\n  🛠️ Получение названий услуг...');
         for (const service of tourData.services) {
             const serviceId = service.id;
             if (!tourServicesToFind.has(serviceId)) {
-                const serviceName = await aviannaApi.getTourServiceName(serviceId);
+                const serviceName = tourData.service_names?.[serviceId];
                 if (serviceName) {
                     tourServicesToFind.set(serviceId, {
                         name: serviceName,
@@ -1242,7 +1268,7 @@ async function performMapping(
         for (const service of tourData.required_services) {
             const serviceId = service.id;
             if (!tourServicesToFind.has(serviceId)) {
-                const serviceName = await aviannaApi.getTourServiceName(serviceId);
+                const serviceName = tourData.service_names?.[serviceId];
                 if (serviceName) {
                     tourServicesToFind.set(serviceId, {
                         name: serviceName,
@@ -1259,7 +1285,7 @@ async function performMapping(
         for (const service of tourData.additional_services) {
             const serviceId = service.id;
             if (!tourServicesToFind.has(serviceId)) {
-                const serviceName = await aviannaApi.getTourServiceName(serviceId);
+                const serviceName = tourData.service_names?.[serviceId];
                 if (serviceName) {
                     tourServicesToFind.set(serviceId, {
                         name: serviceName,
@@ -1273,7 +1299,7 @@ async function performMapping(
     }
 
     if (tourServicesToFind.size > 0) {
-        console.log('\n  🛠️ Маппинг услуг тура:');
+        console.log('\n  🛠️ Услуги тура:');
         for (const [id, serviceData] of tourServicesToFind) {
             await mapEntity(id, serviceData.name,
                 (name) => pazlApi.findTourService(name),
@@ -1338,37 +1364,45 @@ async function performMapping(
 
     console.log(`  Сущностей: размещений=${accommodationsMap.size}, типов инфраструктуры=${infraTypesMap.size}, инфраструктур=${infrastructuresMap.size}, типов комнат=${roomTypesMap.size}, мест=${roomPlacesMap.size}, описаний=${roomDescriptionsMap.size}, сервисов=${roomServicesMap.size}, оборудования=${roomEquipmentsMap.size}, мебели=${roomFurnituresMap.size}, ванных=${roomBathroomsMap.size}`);
 
-    console.log('\n  🏨 Маппинг сущностей гостиниц...');
+    const hasHotelEntities = accommodationsMap.size > 0 || infraTypesMap.size > 0 ||
+        infrastructuresMap.size > 0 || roomTypesMap.size > 0 ||
+        roomPlacesMap.size > 0 || roomDescriptionsMap.size > 0 ||
+        roomServicesMap.size > 0 || roomEquipmentsMap.size > 0 ||
+        roomFurnituresMap.size > 0 || roomBathroomsMap.size > 0;
 
-    for (const [id, name] of accommodationsMap) {
-        await mapEntity(id, name, (n) => pazlApi.findHotelAccommodation(n), mappings.hotel_accommodations, name);
-    }
-    for (const [id, name] of infraTypesMap) {
-        await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructureType(n), mappings.hotel_infrastructure_types, name);
-    }
-    for (const [id, name] of infrastructuresMap) {
-        await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructure(n), mappings.hotel_infrastructures, name);
-    }
-    for (const [id, name] of roomTypesMap) {
-        await mapEntity(id, name, (n) => pazlApi.findRoomType(n), mappings.room_types, name);
-    }
-    for (const [id, name] of roomPlacesMap) {
-        await mapEntity(id, name, (n) => pazlApi.findRoomPlace(n), mappings.room_places, name);
-    }
-    for (const [id, name] of roomDescriptionsMap) {
-        await mapEntity(id, name, (n) => pazlApi.findRoomDescription(n), mappings.room_descriptions, name);
-    }
-    for (const [id, name] of roomServicesMap) {
-        await mapEntity(id, name, (n) => pazlApi.findRoomService(n), mappings.room_services, name);
-    }
-    for (const [id, name] of roomEquipmentsMap) {
-        await mapEntity(id, name, (n) => pazlApi.findRoomEquipment(n), mappings.room_equipments, name);
-    }
-    for (const [id, name] of roomFurnituresMap) {
-        await mapEntity(id, name, (n) => pazlApi.findRoomFurniture(n), mappings.room_furnitures, name);
-    }
-    for (const [id, name] of roomBathroomsMap) {
-        await mapEntity(id, name, (n) => pazlApi.findRoomBathroom(n), mappings.room_bathrooms, name);
+    if (hasHotelEntities) {
+        console.log('\n  🏨 Маппинг сущностей гостиниц...');
+
+        for (const [id, name] of accommodationsMap) {
+            await mapEntity(id, name, (n) => pazlApi.findHotelAccommodation(n), mappings.hotel_accommodations, name);
+        }
+        for (const [id, name] of infraTypesMap) {
+            await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructureType(n), mappings.hotel_infrastructure_types, name);
+        }
+        for (const [id, name] of infrastructuresMap) {
+            await mapEntity(id, name, (n) => pazlApi.findHotelInfrastructure(n), mappings.hotel_infrastructures, name);
+        }
+        for (const [id, name] of roomTypesMap) {
+            await mapEntity(id, name, (n) => pazlApi.findRoomType(n), mappings.room_types, name);
+        }
+        for (const [id, name] of roomPlacesMap) {
+            await mapEntity(id, name, (n) => pazlApi.findRoomPlace(n), mappings.room_places, name);
+        }
+        for (const [id, name] of roomDescriptionsMap) {
+            await mapEntity(id, name, (n) => pazlApi.findRoomDescription(n), mappings.room_descriptions, name);
+        }
+        for (const [id, name] of roomServicesMap) {
+            await mapEntity(id, name, (n) => pazlApi.findRoomService(n), mappings.room_services, name);
+        }
+        for (const [id, name] of roomEquipmentsMap) {
+            await mapEntity(id, name, (n) => pazlApi.findRoomEquipment(n), mappings.room_equipments, name);
+        }
+        for (const [id, name] of roomFurnituresMap) {
+            await mapEntity(id, name, (n) => pazlApi.findRoomFurniture(n), mappings.room_furnitures, name);
+        }
+        for (const [id, name] of roomBathroomsMap) {
+            await mapEntity(id, name, (n) => pazlApi.findRoomBathroom(n), mappings.room_bathrooms, name);
+        }
     }
 
     // 9. Каталоги
@@ -1417,7 +1451,6 @@ async function performMapping(
 async function createMissingEntities(
     pazlApi: PazlApiClient,
     mappings: any,
-    aviannaApi: AviannaApiClient,
     tourData: any
 ): Promise<Map<string, CreatedEntity>> {
     const createdEntities = new Map<string, CreatedEntity>();
@@ -2086,9 +2119,9 @@ router.post('/', async (req: Request, res: Response) => {
         console.log('✅ Вход в Avianna выполнен!');
         const aviannaApi = new AviannaApiClient(aviannaPage);
 
-        // Поиск тура
+        // Поиск и загрузка ВСЕХ данных тура из Avianna
         console.log('\n' + '='.repeat(80));
-        console.log('📥 ПОИСК ТУРА В AVIANNA');
+        console.log('📥 ПОИСК И ЗАГРУЗКА ТУРА ИЗ AVIANNA');
         console.log('='.repeat(80));
 
         console.log(`\n🔍 Поиск тура: "${tourName}"`);
@@ -2106,6 +2139,7 @@ router.post('/', async (req: Request, res: Response) => {
         const tourBasic = toursResult.data.find((t: any) => t.name === tourName) || toursResult.data[0];
         console.log(`✅ Найден: ${tourBasic.name} (ID: ${tourBasic.id})`);
 
+        // Загружаем ВСЕ данные (города, категории, услуги) в одном месте
         const tourData = await extractTourData(aviannaApi, tourBasic.id);
 
         if (!tourData) {
@@ -2116,6 +2150,10 @@ router.post('/', async (req: Request, res: Response) => {
                 error: 'Не удалось загрузить данные тура'
             });
         }
+
+        // Закрываем страницу Avianna, она больше не нужна
+        console.log('\n  ✅ Все данные из Avianna загружены. Страница Avianna больше не нужна.');
+        await aviannaPage.close();
 
         // Вход в Pazl Tours
         console.log('\n' + '='.repeat(80));
@@ -2136,11 +2174,11 @@ router.post('/', async (req: Request, res: Response) => {
 
         const pazlApi = new PazlApiClient(pazlPage);
 
-        // Поиск соответствий
-        const { mappings, stats } = await performMapping(aviannaApi, pazlApi, tourData);
+        // Поиск соответствий (только Pazl API, без Avianna)
+        const { mappings, stats } = await performMapping(pazlApi, tourData);
 
         // Создание недостающих сущностей
-        const createdEntities = await createMissingEntities(pazlApi, mappings, aviannaApi, tourData);
+        const createdEntities = await createMissingEntities(pazlApi, mappings, tourData);
 
         // Создание тура
         const tourCreated = await createTour(pazlApi, tourData, mappings);
