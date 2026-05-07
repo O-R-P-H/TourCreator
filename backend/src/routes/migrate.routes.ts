@@ -1405,6 +1405,8 @@ async function performMapping(
 
     const totalEntities = accommodationsMap.size + infraTypesMap.size + infrastructuresMap.size + roomTypesMap.size + roomPlacesMap.size + roomDescriptionsMap.size + roomServicesMap.size + roomEquipmentsMap.size + roomFurnituresMap.size + roomBathroomsMap.size;
 
+    console.log(`  Сущностей: размещений=${accommodationsMap.size}, типов инфраструктуры=${infraTypesMap.size}, инфраструктур=${infrastructuresMap.size}, типов комнат=${roomTypesMap.size}, мест=${roomPlacesMap.size}, описаний=${roomDescriptionsMap.size}, сервисов=${roomServicesMap.size}, оборудования=${roomEquipmentsMap.size}, мебели=${roomFurnituresMap.size}, ванных=${roomBathroomsMap.size}`);
+
     if (totalEntities > 0) {
         if (sessionId) sendSSE(sessionId, 'step', { step: 3, status: 'active', message: `Маппинг сущностей гостиниц (${totalEntities})...` });
         console.log('\n  🏨 Маппинг сущностей гостиниц...');
@@ -2130,12 +2132,14 @@ router.get('/stream/:sessionId', (req: Request, res: Response) => {
     const session = sessions.get(sessionId);
     if (session) {
         session.res = res;
+        console.log('✅ SSE res установлен для сессии:', sessionId);
     } else {
         sessions.set(sessionId, {
             res: res,
             status: 'connected',
             log: []
         });
+        console.log('🆕 Создана новая SSE сессия:', sessionId);
     }
 
     const pingInterval = setInterval(() => {
@@ -2172,12 +2176,30 @@ router.post('/start', async (req: Request, res: Response) => {
     // Возвращаем sessionId сразу
     res.json({ success: true, data: { sessionId } });
 
-    // Запускаем миграцию асинхронно
-    runMigration(sessionId, aviannaEmail, aviannaPassword, pazlEmail, pazlPassword, tourName).catch(err => {
-        console.error('Migration error:', err);
-        sendSSE(sessionId, 'error', { message: err.message || 'Неизвестная ошибка' });
-    });
+    // Ждём подключения SSE клиента, потом запускаем миграцию
+    waitForSSEAndRun(sessionId, aviannaEmail, aviannaPassword, pazlEmail, pazlPassword, tourName);
 });
+
+async function waitForSSEAndRun(
+    sessionId: string,
+    aviannaEmail: string, aviannaPassword: string,
+    pazlEmail: string, pazlPassword: string, tourName: string
+) {
+    // Ждём пока SSE клиент подключится (res будет установлен)
+    let attempts = 0;
+    while (attempts < 100) {
+        const session = sessions.get(sessionId);
+        if (session && session.res) {
+            console.log('✅ SSE клиент подключен, запускаем миграцию');
+            await runMigration(sessionId, aviannaEmail, aviannaPassword, pazlEmail, pazlPassword, tourName);
+            return;
+        }
+        await new Promise(r => setTimeout(r, 200));
+        attempts++;
+    }
+    console.error('❌ SSE клиент не подключился за 20 секунд');
+    sendSSE(sessionId, 'error', { message: 'Таймаут подключения SSE клиента' });
+}
 
 // ============================================
 // ВЫПОЛНЕНИЕ МИГРАЦИИ
@@ -2260,7 +2282,7 @@ async function runMigration(
         const pazlLoggedIn = await loginToPazl(pazlPage, pazlEmail, pazlPassword);
 
         if (!pazlLoggedIn) {
-            sendSSE(sessionId, 'step', { step: 2, status: 'error', message: 'Неверный email или пароль Pazl' });
+            sendSSE(sessionId, 'step', { step: 2, status: 'error', message: 'Неверный email или пароль Pazl Tours' });
             await browser.close();
             return;
         }
