@@ -480,6 +480,7 @@ async function startMigration(): Promise<void> {
 function resetForm(): void {
   result.value = null;
   error.value = '';
+  loading.value = false;
   migrationStarted.value = false;
   resetSteps();
   form.value = {
