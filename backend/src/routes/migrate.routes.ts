@@ -30,7 +30,7 @@ interface CreatedEntity {
 const sessions = new Map<string, {
     res: Response | null;
     status: string;
-    log: string[];
+    log: any[];
     tourData?: any;
     mappings?: any;
     stats?: any;
@@ -45,14 +45,21 @@ function sendSSE(sessionId: string, event: string, data: any) {
         console.log(`⚠️ SSE: сессия ${sessionId} не найдена`);
         return;
     }
+
+    // Сохраняем в лог для последующей отправки при подключении
+    if (event === 'step') {
+        session.log.push(data);
+    }
+
     if (!session.res) {
-        console.log(`⚠️ SSE: res отсутствует для сессии ${sessionId}, event: ${event}`);
+        console.log(`⚠️ SSE: res отсутствует для сессии ${sessionId}, event: ${event}, кешируем`);
         return;
     }
+
     try {
         const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
         session.res.write(msg);
-        console.log(`📤 SSE отправлено [${sessionId}]: ${event}`);
+        console.log(`📤 SSE отправлено [${sessionId}]: ${event} - ${JSON.stringify(data).substring(0, 100)}`);
     } catch (e) {
         console.log(`❌ SSE send error [${sessionId}]:`, e);
     }
@@ -2137,17 +2144,22 @@ router.get('/stream/:sessionId', (req: Request, res: Response) => {
 
     res.write(`event: connected\ndata: ${JSON.stringify({ sessionId })}\n\n`);
 
+    // Сохраняем res и отправляем накопленные логи
     const session = sessions.get(sessionId);
     if (session) {
         session.res = res;
-        console.log('✅ SSE res установлен для сессии:', sessionId);
+        console.log(`✅ SSE res установлен для сессии: ${sessionId}`);
+
+        // Отправляем все накопленные события
+        if (session.log.length > 0) {
+            console.log(`📤 Отправка ${session.log.length} накопленных событий для ${sessionId}`);
+            for (const logEntry of session.log) {
+                res.write(`event: step\ndata: ${JSON.stringify(logEntry)}\n\n`);
+            }
+        }
     } else {
-        sessions.set(sessionId, {
-            res: res,
-            status: 'connected',
-            log: []
-        });
-        console.log('🆕 Создана новая SSE сессия:', sessionId);
+        sessions.set(sessionId, { res, status: 'connected', log: [] });
+        console.log(`🆕 Создана новая SSE сессия: ${sessionId}`);
     }
 
     const pingInterval = setInterval(() => {
@@ -2181,33 +2193,18 @@ router.post('/start', async (req: Request, res: Response) => {
 
     console.log(`🆕 Создана сессия миграции: ${sessionId}`);
 
-    // Возвращаем sessionId сразу
+    // Сразу возвращаем sessionId, не ждём SSE
     res.json({ success: true, data: { sessionId } });
 
-    // Ждём подключения SSE клиента, потом запускаем миграцию
-    waitForSSEAndRun(sessionId, aviannaEmail, aviannaPassword, pazlEmail, pazlPassword, tourName);
-});
-
-async function waitForSSEAndRun(
-    sessionId: string,
-    aviannaEmail: string, aviannaPassword: string,
-    pazlEmail: string, pazlPassword: string, tourName: string
-) {
-    // Ждём пока SSE клиент подключится (res будет установлен)
-    let attempts = 0;
-    while (attempts < 100) {
+    // Запускаем миграцию асинхронно
+    runMigration(sessionId, aviannaEmail, aviannaPassword, pazlEmail, pazlPassword, tourName).catch(err => {
+        console.error('Migration error:', err);
         const session = sessions.get(sessionId);
         if (session && session.res) {
-            console.log('✅ SSE клиент подключен, запускаем миграцию');
-            await runMigration(sessionId, aviannaEmail, aviannaPassword, pazlEmail, pazlPassword, tourName);
-            return;
+            sendSSE(sessionId, 'error', { message: err.message || 'Неизвестная ошибка' });
         }
-        await new Promise(r => setTimeout(r, 200));
-        attempts++;
-    }
-    console.error('❌ SSE клиент не подключился за 20 секунд');
-    sendSSE(sessionId, 'error', { message: 'Таймаут подключения SSE клиента' });
-}
+    });
+});
 
 // ============================================
 // ВЫПОЛНЕНИЕ МИГРАЦИИ
