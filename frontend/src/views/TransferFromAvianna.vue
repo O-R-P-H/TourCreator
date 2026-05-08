@@ -20,12 +20,16 @@
           <div class="info-box">
             <h4>📋 Процесс миграции:</h4>
             <ol>
+              <li>🚀 Запуск браузера</li>
               <li>🔐 Вход в Avianna</li>
               <li>🔍 Поиск и загрузка тура</li>
+              <li>📥 Скачивание файлов (фото, документы)</li>
               <li>🔐 Вход в Pazl Tours</li>
               <li>🔍 Поиск соответствий</li>
               <li>🔨 Создание недостающих сущностей</li>
+              <li>📤 Загрузка файлов в Pazl</li>
               <li>🎯 Создание тура в Pazl Tours</li>
+              <li>🧹 Очистка временных файлов</li>
             </ol>
           </div>
 
@@ -162,6 +166,31 @@
               {{ result.tourCreated ? '✅ Тур успешно создан!' : '⚠️ Миграция завершена с предупреждениями' }}
             </h2>
             <p class="result-message">{{ result.message }}</p>
+            <div v-if="result.tourId" class="result-tour-id">
+              ID тура в Pazl: <strong>{{ result.tourId }}</strong>
+            </div>
+          </div>
+
+          <div v-if="result.filesUploaded" class="section-block">
+            <h3>📸 Загруженные файлы</h3>
+            <div class="stats-container stats-files">
+              <div class="stat-card">
+                <div class="stat-value">{{ result.filesUploaded.mainPhotos }}</div>
+                <div class="stat-label">Основные фото</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{{ result.filesUploaded.dayPhotos }}</div>
+                <div class="stat-label">Фото дней</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{{ result.filesUploaded.hotelPhotos }}</div>
+                <div class="stat-label">Фото отелей</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value">{{ result.filesUploaded.tourFiles }}</div>
+                <div class="stat-label">Файлы</div>
+              </div>
+            </div>
           </div>
 
           <div class="stats-container">
@@ -249,6 +278,10 @@
                 <span class="value">{{ result.tourData.id }}</span>
               </div>
               <div class="tour-info-item">
+                <span class="label">ID в Pazl:</span>
+                <span class="value">{{ result.tourId || '—' }}</span>
+              </div>
+              <div class="tour-info-item">
                 <span class="label">Статус создания:</span>
                 <span class="value" :class="result.tourCreated ? 'text-success' : 'text-warning'">
                   {{ result.tourCreated ? '✅ Успешно создан в Pazl Tours' : '❌ Не создан' }}
@@ -294,13 +327,22 @@ interface Step {
 }
 
 const steps = reactive<Step[]>([
-  { title: 'Вход в Avianna', status: 'pending', message: '' },
-  { title: 'Поиск и загрузка тура', status: 'pending', message: '' },
+  { title: 'Запуск браузера', status: 'pending', message: '' },
+  { title: 'Поиск и загрузка тура (Avianna)', status: 'pending', message: '' },
   { title: 'Вход в Pazl Tours', status: 'pending', message: '' },
   { title: 'Поиск соответствий', status: 'pending', message: '' },
-  { title: 'Создание недостающих сущностей', status: 'pending', message: '' },
+  { title: 'Создание сущностей и загрузка файлов', status: 'pending', message: '' },
   { title: 'Создание тура в Pazl Tours', status: 'pending', message: '' },
 ]);
+
+const stepMapping: Record<number, number> = {
+  0: 0,  // Запуск браузера
+  1: 1,  // Поиск и загрузка тура (включает Avianna вход + загрузка + скачивание)
+  2: 2,  // Вход в Pazl
+  3: 3,  // Маппинг
+  4: 4,  // Создание сущностей + загрузка файлов
+  5: 5,  // Создание тура
+};
 
 const hasError = computed(() => {
   return steps.some(step => step.status === 'error');
@@ -376,8 +418,9 @@ function updateProgress(): void {
 }
 
 function updateStep(stepIndex: number, status: Step['status'], message: string, errMsg?: string): void {
-  if (stepIndex >= 0 && stepIndex < steps.length) {
-    const step = steps[stepIndex];
+  const mappedIndex = stepMapping[stepIndex];
+  if (mappedIndex !== undefined && mappedIndex >= 0 && mappedIndex < steps.length) {
+    const step = steps[mappedIndex];
     if (step) {
       step.status = status;
       step.message = message;
@@ -447,8 +490,15 @@ async function startMigration(): Promise<void> {
         result.value = res;
         progressPercent.value = 100;
 
+        // Отмечаем все не-completed шаги как completed
+        steps.forEach(step => {
+          if (step.status !== 'completed' && step.status !== 'error') {
+            step.status = 'completed';
+          }
+        });
+
         if (res.tourCreated) {
-          updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours!');
+          updateStep(5, 'completed', '✅ Тур успешно создан в Pazl Tours! Временные файлы очищены 🧹');
         } else {
           updateStep(5, 'error', '❌ Тур не был создан', res.message);
         }
@@ -894,11 +944,25 @@ function logout(): void {
   font-size: 16px;
 }
 
+.result-tour-id {
+  color: #aaa;
+  font-size: 14px;
+  margin-top: 8px;
+}
+
+.result-tour-id strong {
+  color: #fff;
+}
+
 .stats-container {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 20px;
   margin-bottom: 40px;
+}
+
+.stats-container.stats-files {
+  grid-template-columns: repeat(4, 1fr);
 }
 
 .stat-card {
@@ -919,6 +983,12 @@ function logout(): void {
 .stat-card.exists .stat-value { color: #28a745; }
 .stat-card.create .stat-value { color: #ffc107; }
 .stat-card.created .stat-value { color: #17a2b8; }
+
+.stat-card .stat-value { color: #007bff; }
+.stats-files .stat-card:nth-child(1) .stat-value { color: #ff6b6b; }
+.stats-files .stat-card:nth-child(2) .stat-value { color: #ffc107; }
+.stats-files .stat-card:nth-child(3) .stat-value { color: #17a2b8; }
+.stats-files .stat-card:nth-child(4) .stat-value { color: #28a745; }
 
 .stat-label {
   color: #888;
