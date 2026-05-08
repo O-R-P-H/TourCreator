@@ -84,6 +84,13 @@ export interface CreatedEntity {
     pazl_id: number;
 }
 
+export interface FilesUploaded {
+    mainPhotos: number;
+    dayPhotos: number;
+    hotelPhotos: number;
+    tourFiles: number;
+}
+
 export interface MigrationStats {
     totalToCreate: number;
     totalExists: number;
@@ -100,6 +107,8 @@ export interface MigrationResultData {
     createdEntities: CreatedEntity[];
     stats: MigrationStats;
     tourCreated: boolean;
+    tourId: number | null;
+    filesUploaded: FilesUploaded;
     message: string;
 }
 
