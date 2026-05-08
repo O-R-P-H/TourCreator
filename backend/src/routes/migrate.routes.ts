@@ -1,5 +1,9 @@
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as https from 'https';
+import * as http from 'http';
 
 const router = Router();
 
@@ -21,6 +25,21 @@ interface CreatedEntity {
     source_name: string;
     pazl_id: number;
     original_data?: any;
+}
+
+interface PhotoInfo {
+    url: string;
+    name: string;
+    category: string;
+    subfolder: string;
+}
+
+interface UploadedFile {
+    localPath: string;
+    pazlFileId: number | null;
+    pazlFilePath?: string;
+    pazlFileName?: string;
+    category: string;
 }
 
 // ============================================
@@ -46,7 +65,6 @@ function sendSSE(sessionId: string, event: string, data: any) {
         return;
     }
 
-    // Сохраняем в лог для последующей отправки при подключении
     if (event === 'step') {
         session.log.push(data);
     }
@@ -62,6 +80,332 @@ function sendSSE(sessionId: string, event: string, data: any) {
         console.log(`📤 SSE отправлено [${sessionId}]: ${event} - ${JSON.stringify(data).substring(0, 100)}`);
     } catch (e) {
         console.log(`❌ SSE send error [${sessionId}]:`, e);
+    }
+}
+
+// ============================================
+// УТИЛИТЫ ДЛЯ ФАЙЛОВ
+// ============================================
+
+function sanitizeFolderName(name: string): string {
+    return name
+        .replace(/[<>:"/\\|?*]/g, '_')
+        .replace(/\s+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '')
+        .substring(0, 100)
+        .trim();
+}
+
+function getExtensionFromUrl(url: string): string {
+    try {
+        const urlObj = new URL(url);
+        const pathname = urlObj.pathname;
+        const ext = path.extname(pathname);
+        if (ext && ext.length <= 5) return ext;
+    } catch (e) {
+        // ignore
+    }
+    return '.jpg';
+}
+
+async function downloadFileNode(downloadUrl: string, savePath: string, retries = 3): Promise<boolean> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const dir = path.dirname(savePath);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+
+            await new Promise<void>((resolve, reject) => {
+                const protocol = downloadUrl.startsWith('https') ? https : http;
+
+                protocol.get(downloadUrl, (response) => {
+                    if (response.statusCode === 301 || response.statusCode === 302) {
+                        const redirectUrl = response.headers.location;
+                        if (redirectUrl) {
+                            downloadFileNode(redirectUrl, savePath, 1)
+                                .then(() => resolve())
+                                .catch(reject);
+                            return;
+                        }
+                    }
+
+                    if (response.statusCode !== 200) {
+                        reject(new Error(`HTTP ${response.statusCode}`));
+                        return;
+                    }
+
+                    const fileStream = fs.createWriteStream(savePath);
+                    response.pipe(fileStream);
+
+                    fileStream.on('finish', () => {
+                        fileStream.close();
+                        resolve();
+                    });
+
+                    fileStream.on('error', (error) => {
+                        fs.unlinkSync(savePath);
+                        reject(error);
+                    });
+
+                    response.on('error', (error) => {
+                        fileStream.close();
+                        if (fs.existsSync(savePath)) {
+                            fs.unlinkSync(savePath);
+                        }
+                        reject(error);
+                    });
+                }).on('error', reject);
+            });
+
+            const stats = fs.statSync(savePath);
+            if (stats.size === 0) {
+                fs.unlinkSync(savePath);
+                throw new Error('Empty file');
+            }
+
+            return true;
+
+        } catch (error: any) {
+            if (attempt < retries) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            } else {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+// ============================================
+// СБОР ВСЕХ ФОТО/ФАЙЛОВ ИЗ ДАННЫХ ТУРА
+// ============================================
+
+function collectAllPhotos(tourData: any): PhotoInfo[] {
+    const photos: PhotoInfo[] = [];
+    const tourName = sanitizeFolderName(tourData.name);
+
+    // 1. Основные фото тура
+    if (tourData.photos && Array.isArray(tourData.photos)) {
+        let index = 1;
+        for (const photo of tourData.photos) {
+            if (photo.url) {
+                const ext = getExtensionFromUrl(photo.url);
+                const originalName = photo.name || `photo_${photo.id}`;
+                const baseName = path.parse(originalName).name;
+                const filename = `${String(index).padStart(3, '0')}_${sanitizeFolderName(baseName)}`;
+                photos.push({
+                    url: photo.url,
+                    name: filename + ext,
+                    category: '01_main_photos',
+                    subfolder: tourName
+                });
+                index++;
+            }
+        }
+    }
+
+    // 2. Фото дней
+    if (tourData.days && Array.isArray(tourData.days)) {
+        for (const day of tourData.days) {
+            if (day.photos && Array.isArray(day.photos)) {
+                const dayName = sanitizeFolderName(day.name || `Day_${day.id}`);
+                let index = 1;
+                for (const photo of day.photos) {
+                    if (photo.url) {
+                        const ext = getExtensionFromUrl(photo.url);
+                        const originalName = photo.name || `photo_${photo.id}`;
+                        const baseName = path.parse(originalName).name;
+                        const filename = `${String(index).padStart(3, '0')}_${sanitizeFolderName(baseName)}`;
+                        photos.push({
+                            url: photo.url,
+                            name: filename + ext,
+                            category: '02_days',
+                            subfolder: `${tourName}/${dayName}`
+                        });
+                        index++;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Фото отелей
+    if (tourData.hotels && Array.isArray(tourData.hotels)) {
+        for (const hotel of tourData.hotels) {
+            if (hotel.photos && Array.isArray(hotel.photos) && hotel.photos.length > 0) {
+                const hotelName = sanitizeFolderName(hotel.name || `Hotel_${hotel.id}`);
+                let index = 1;
+                for (const photo of hotel.photos) {
+                    if (photo.url) {
+                        const ext = getExtensionFromUrl(photo.url);
+                        const originalName = photo.name || `photo_${photo.id}`;
+                        const baseName = path.parse(originalName).name;
+                        const filename = `${String(index).padStart(3, '0')}_${sanitizeFolderName(baseName)}`;
+                        photos.push({
+                            url: photo.url,
+                            name: filename + ext,
+                            category: '03_hotels',
+                            subfolder: `${tourName}/${hotelName}`
+                        });
+                        index++;
+                    }
+                }
+            }
+
+            if (hotel.rooms && Array.isArray(hotel.rooms)) {
+                const hotelName = sanitizeFolderName(hotel.name || `Hotel_${hotel.id}`);
+                for (const room of hotel.rooms) {
+                    if (room.photos && Array.isArray(room.photos) && room.photos.length > 0) {
+                        const roomType = room.type?.name || room.place?.name || `Room_${room.id}`;
+                        const roomName = sanitizeFolderName(roomType);
+                        let index = 1;
+                        for (const photo of room.photos) {
+                            if (photo.url) {
+                                const ext = getExtensionFromUrl(photo.url);
+                                const originalName = photo.name || `photo_${photo.id}`;
+                                const baseName = path.parse(originalName).name;
+                                const filename = `${String(index).padStart(3, '0')}_${sanitizeFolderName(baseName)}`;
+                                photos.push({
+                                    url: photo.url,
+                                    name: filename + ext,
+                                    category: '03_hotels',
+                                    subfolder: `${tourName}/${hotelName}/rooms/${roomName}`
+                                });
+                                index++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Файлы тура
+    if (tourData.files && Array.isArray(tourData.files)) {
+        let index = 1;
+        for (const file of tourData.files) {
+            if (file.url) {
+                const originalName = file.name || `file_${file.id}`;
+                const ext = path.extname(originalName) || getExtensionFromUrl(file.url);
+                const baseName = path.parse(originalName).name;
+                const filename = `${String(index).padStart(3, '0')}_${sanitizeFolderName(baseName)}`;
+                photos.push({
+                    url: file.url,
+                    name: filename + ext,
+                    category: '04_files',
+                    subfolder: tourName
+                });
+                index++;
+            }
+        }
+    }
+
+    return photos;
+}
+
+// ============================================
+// СКАЧИВАНИЕ ВСЕХ ФАЙЛОВ
+// ============================================
+
+async function downloadAllPhotosFromAvianna(
+    tourData: any,
+    baseDownloadDir: string,
+    sessionId?: string
+): Promise<Map<string, string[]>> {
+    if (sessionId) sendSSE(sessionId, 'step', { step: 1, status: 'active', message: 'Скачивание файлов из Avianna...' });
+
+    const allPhotos = collectAllPhotos(tourData);
+    console.log(`\n  📊 Найдено файлов для скачивания: ${allPhotos.length}`);
+
+    const stats: Record<string, number> = {};
+    for (const photo of allPhotos) {
+        stats[photo.category] = (stats[photo.category] || 0) + 1;
+    }
+    console.log('  📂 По категориям:');
+    for (const [category, count] of Object.entries(stats)) {
+        const names: Record<string, string> = {
+            '01_main_photos': 'Основные фото',
+            '02_days': 'Фото дней',
+            '03_hotels': 'Фото отелей',
+            '04_files': 'Файлы'
+        };
+        console.log(`     ${names[category] || category}: ${count} шт.`);
+    }
+
+    const downloadedFiles = new Map<string, string[]>();
+    let downloadedCount = 0;
+    let failedCount = 0;
+
+    // Отправляем общее количество для прогресса
+    if (sessionId) sendSSE(sessionId, 'step', {
+        step: 1,
+        status: 'active',
+        message: `Скачивание ${allPhotos.length} файлов...`,
+        totalFiles: allPhotos.length
+    });
+
+    for (let i = 0; i < allPhotos.length; i++) {
+        const photo = allPhotos[i];
+        const savePath = path.join(baseDownloadDir, photo.category, photo.subfolder, photo.name);
+
+        if (sessionId && i % 5 === 0) {
+            sendSSE(sessionId, 'step', {
+                step: 1,
+                status: 'active',
+                message: `Скачано ${downloadedCount}/${allPhotos.length}...`,
+                totalFiles: allPhotos.length,
+                downloadedCount
+            });
+        }
+
+        const success = await downloadFileNode(photo.url, savePath);
+
+        if (success) {
+            downloadedCount++;
+            const category = photo.category;
+            if (!downloadedFiles.has(category)) {
+                downloadedFiles.set(category, []);
+            }
+            downloadedFiles.get(category)!.push(savePath);
+        } else {
+            failedCount++;
+            console.log(`     ❌ Ошибка скачивания [${i + 1}/${allPhotos.length}]: ${photo.name}`);
+        }
+    }
+
+    console.log(`\n  📊 Результаты скачивания:`);
+    console.log(`     Всего: ${allPhotos.length}`);
+    console.log(`     Успешно: ${downloadedCount}`);
+    if (failedCount > 0) {
+        console.log(`     Ошибок: ${failedCount}`);
+    }
+
+    if (sessionId) sendSSE(sessionId, 'step', {
+        step: 1,
+        status: 'completed',
+        message: `Скачано ${downloadedCount}/${allPhotos.length} файлов`,
+        totalFiles: allPhotos.length,
+        downloadedCount,
+        failedCount
+    });
+
+    return downloadedFiles;
+}
+
+// ============================================
+// УДАЛЕНИЕ ВРЕМЕННЫХ ФАЙЛОВ
+// ============================================
+
+function cleanupDownloadedFiles(baseDownloadDir: string): void {
+    try {
+        if (fs.existsSync(baseDownloadDir)) {
+            fs.rmSync(baseDownloadDir, { recursive: true, force: true });
+            console.log(`🧹 Очищена папка загрузок: ${baseDownloadDir}`);
+        }
+    } catch (error) {
+        console.log(`⚠️ Не удалось удалить папку ${baseDownloadDir}:`, error);
     }
 }
 
@@ -345,7 +689,7 @@ async function extractTourData(api: AviannaApiClient, tourId: number, sessionId?
         }
     }
 
-    // Загружаем названия услуг
+    // Загружаем названия и данные услуг
     const serviceIds = new Set<number>();
     [...(tour.services || []), ...(tour.required_services || []), ...(tour.additional_services || [])].forEach((s: any) => {
         if (s.id) serviceIds.add(s.id);
@@ -487,6 +831,105 @@ class PazlApiClient {
             return result as T;
         } catch (error: any) {
             console.log(`      ⚠️ Ошибка Pazl: ${url} - ${error.message}`);
+            return null;
+        }
+    }
+
+    async uploadFileToTemp(endpoint: string, filePath: string, fileType: string = '1'): Promise<{ path: string; url: string; name: string; type: string } | null> {
+        await this.init();
+
+        const fullUrl = endpoint.startsWith('http') ? endpoint : `https://gate.pazltours.online/api${endpoint}`;
+        const fileName = path.basename(filePath);
+
+        try {
+            const fileBuffer = fs.readFileSync(filePath);
+            const base64Data = fileBuffer.toString('base64');
+
+            const result = await this.page.evaluate(async ({ fetchUrl, fileBase64, fileName, xsrfToken, fileType }) => {
+                const byteCharacters = atob(fileBase64);
+                const byteNumbers = new Array(byteCharacters.length);
+                for (let i = 0; i < byteCharacters.length; i++) {
+                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+
+                const ext = fileName.split('.').pop()?.toLowerCase() || '';
+                const mimeTypes: Record<string, string> = {
+                    'jpg': 'image/jpeg',
+                    'jpeg': 'image/jpeg',
+                    'png': 'image/png',
+                    'gif': 'image/gif',
+                    'webp': 'image/webp',
+                    'pdf': 'application/pdf',
+                    'doc': 'application/msword',
+                    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                };
+                const mimeType = mimeTypes[ext] || 'application/octet-stream';
+
+                const blob = new Blob([byteArray], { type: mimeType });
+                const formData = new FormData();
+                formData.append('file', blob, fileName);
+                if (fileType) {
+                    formData.append('type', fileType);
+                }
+
+                const response = await fetch(fetchUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'X-XSRF-TOKEN': xsrfToken
+                    },
+                    credentials: 'include',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    return {
+                        __error: true,
+                        __status: response.status,
+                        __body: errorText
+                    };
+                }
+
+                const text = await response.text();
+                if (!text) {
+                    return { status: 'OK' };
+                }
+
+                try {
+                    return JSON.parse(text);
+                } catch {
+                    return { status: 'OK', data: text };
+                }
+            }, {
+                fetchUrl: fullUrl,
+                fileBase64: base64Data,
+                fileName: fileName,
+                xsrfToken: this.xsrfToken,
+                fileType: fileType
+            });
+
+            if (result?.__error) {
+                console.log(`      ❌ Upload Error ${result.__status}: ${result.__body}`);
+                return null;
+            }
+
+            if (result?.path && result?.name) {
+                return {
+                    path: result.path,
+                    url: result.url || '',
+                    name: result.name,
+                    type: result.type || fileType
+                };
+            }
+
+            console.log(`      ⚠️ Неожиданный формат ответа: ${JSON.stringify(result).substring(0, 200)}`);
+            return null;
+
+        } catch (error) {
+            console.log(`      ⚠️ Ошибка загрузки файла: ${fileName}`, error);
             return null;
         }
     }
@@ -901,14 +1344,11 @@ class PazlApiClient {
                         pay: infra.pay || 0,
                         type: typeId
                     });
-                    console.log(`      ✅ Инфраструктура: ${infra.name} (ID: ${infraId}, тип: ${typeId})`);
                 }
             }
         }
 
         if (infrastructures.length === 0) {
-            console.log(`      ⚠️ Гостиница без инфраструктур, создаём базовую...`);
-
             let typeId = 1;
             let typeFound = await this.findHotelInfrastructureType('Удобства');
             if (!typeFound) {
@@ -1418,7 +1858,9 @@ async function performMapping(
         });
     });
 
-    const totalEntities = accommodationsMap.size + infraTypesMap.size + infrastructuresMap.size + roomTypesMap.size + roomPlacesMap.size + roomDescriptionsMap.size + roomServicesMap.size + roomEquipmentsMap.size + roomFurnituresMap.size + roomBathroomsMap.size;
+    const totalEntities = accommodationsMap.size + infraTypesMap.size + infrastructuresMap.size +
+        roomTypesMap.size + roomPlacesMap.size + roomDescriptionsMap.size +
+        roomServicesMap.size + roomEquipmentsMap.size + roomFurnituresMap.size + roomBathroomsMap.size;
 
     console.log(`  Сущностей: размещений=${accommodationsMap.size}, типов инфраструктуры=${infraTypesMap.size}, инфраструктур=${infrastructuresMap.size}, типов комнат=${roomTypesMap.size}, мест=${roomPlacesMap.size}, описаний=${roomDescriptionsMap.size}, сервисов=${roomServicesMap.size}, оборудования=${roomEquipmentsMap.size}, мебели=${roomFurnituresMap.size}, ванных=${roomBathroomsMap.size}`);
 
@@ -1794,6 +2236,221 @@ async function createMissingEntities(
 }
 
 // ============================================
+// ЗАГРУЗКА ФАЙЛОВ В PAZL
+// ============================================
+
+async function uploadFilesToPazl(
+    pazlApi: PazlApiClient,
+    downloadedFiles: Map<string, string[]>,
+    mappings: any,
+    tourData: any,
+    sessionId?: string
+): Promise<{
+    mainPhotos: UploadedFile[],
+    dayPhotos: Map<number, UploadedFile[]>,
+    hotelPhotosCount: number,
+    tourFiles: UploadedFile[]
+}> {
+    if (sessionId) sendSSE(sessionId, 'step', { step: 4, status: 'active', message: 'Загрузка файлов в Pazl Tours...' });
+
+    console.log('\n' + '='.repeat(80));
+    console.log('📤 ЗАГРУЗКА ФАЙЛОВ В PAZL TOURS');
+    console.log('='.repeat(80));
+
+    const mainPhotos: UploadedFile[] = [];
+    const dayPhotos = new Map<number, UploadedFile[]>();
+    const tourFiles: UploadedFile[] = [];
+    let hotelPhotosCount = 0;
+
+    // 1. Основные фото тура
+    const mainPhotosPaths = downloadedFiles.get('01_main_photos') || [];
+    if (mainPhotosPaths.length > 0) {
+        console.log(`\n  🖼️ Загрузка основных фото тура (${mainPhotosPaths.length})`);
+        for (const photoPath of mainPhotosPaths) {
+            if (fs.existsSync(photoPath)) {
+                console.log(`    📤 ${path.basename(photoPath)}`);
+                const fileData = await pazlApi.uploadFileToTemp('/tours/files', photoPath, '1');
+                if (fileData) {
+                    mainPhotos.push({
+                        localPath: photoPath,
+                        pazlFileId: null,
+                        pazlFilePath: fileData.path,
+                        pazlFileName: fileData.name,
+                        category: 'main_photo'
+                    });
+                    console.log(`      ✅ Загружено`);
+                } else {
+                    console.log(`      ❌ Ошибка`);
+                }
+            }
+        }
+    }
+
+    // 2. Фото дней
+    const dayPhotosPaths = downloadedFiles.get('02_days') || [];
+    if (dayPhotosPaths.length > 0 && tourData.days) {
+        console.log(`\n  📅 Загрузка фото дней тура (${dayPhotosPaths.length})`);
+
+        for (let dayIndex = 0; dayIndex < tourData.days.length; dayIndex++) {
+            const day = tourData.days[dayIndex];
+            const dayFolderName = sanitizeFolderName(day.name || `Day_${day.id}`);
+
+            const daySpecificPhotos = dayPhotosPaths.filter(p => {
+                const normalizedPath = p.replace(/\\/g, '/');
+                return normalizedPath.includes(`/02_days/`) && normalizedPath.includes(`/${dayFolderName}/`);
+            });
+
+            if (daySpecificPhotos.length > 0) {
+                console.log(`    День "${day.name}" (${daySpecificPhotos.length} фото)`);
+                const uploadedDayPhotos: UploadedFile[] = [];
+
+                for (const photoPath of daySpecificPhotos) {
+                    if (fs.existsSync(photoPath)) {
+                        console.log(`      📤 ${path.basename(photoPath)}`);
+                        const fileData = await pazlApi.uploadFileToTemp('/tours/files', photoPath, '1');
+                        if (fileData) {
+                            uploadedDayPhotos.push({
+                                localPath: photoPath,
+                                pazlFileId: null,
+                                pazlFilePath: fileData.path,
+                                pazlFileName: fileData.name,
+                                category: 'day_photo'
+                            });
+                            console.log(`        ✅ Загружено`);
+                        } else {
+                            console.log(`        ❌ Ошибка`);
+                        }
+                    }
+                }
+
+                if (uploadedDayPhotos.length > 0) {
+                    dayPhotos.set(dayIndex, uploadedDayPhotos);
+                }
+            }
+        }
+    }
+
+    // 3. Фото отелей — загружаем через /hotels/files и обновляем отель через PUT
+    const hotelPhotosPaths = downloadedFiles.get('03_hotels') || [];
+    if (hotelPhotosPaths.length > 0 && tourData.hotels) {
+        console.log(`\n  🏨 Загрузка фото отелей (${hotelPhotosPaths.length})`);
+
+        for (const hotel of tourData.hotels) {
+            const hotelFolderName = sanitizeFolderName(hotel.name || `Hotel_${hotel.id}`);
+
+            const hotelSpecificPhotos = hotelPhotosPaths.filter(p => {
+                const normalizedPath = p.replace(/\\/g, '/');
+                return normalizedPath.includes(`/03_hotels/`) &&
+                    normalizedPath.includes(`/${hotelFolderName}/`) &&
+                    !normalizedPath.includes('/rooms/');
+            });
+
+            if (hotelSpecificPhotos.length > 0) {
+                const mappedHotel = mappings.hotels.find((h: MappedEntity) => h.source_id === hotel.id);
+                if (mappedHotel && !mappedHotel.needs_creation && mappedHotel.pazl_id) {
+                    console.log(`    Отель "${hotel.name}" (ID: ${mappedHotel.pazl_id}, ${hotelSpecificPhotos.length} фото)`);
+
+                    const uploadedHotelPhotos: any[] = [];
+
+                    for (let i = 0; i < hotelSpecificPhotos.length; i++) {
+                        const photoPath = hotelSpecificPhotos[i];
+                        if (fs.existsSync(photoPath)) {
+                            console.log(`      📤 ${path.basename(photoPath)}`);
+                            const fileData = await pazlApi.uploadFileToTemp('/hotels/files', photoPath, '3');
+                            if (fileData) {
+                                uploadedHotelPhotos.push({
+                                    name: fileData.name,
+                                    path: fileData.path,
+                                    url: fileData.url,
+                                    alt: null,
+                                    sort: i + 1
+                                });
+                                console.log(`        ✅ Загружено (sort: ${i + 1})`);
+                                hotelPhotosCount++;
+                            } else {
+                                console.log(`        ❌ Ошибка`);
+                            }
+                        }
+                    }
+
+                    if (uploadedHotelPhotos.length > 0) {
+                        console.log(`      📤 Обновление отеля ${mappedHotel.pazl_id} с ${uploadedHotelPhotos.length} фото...`);
+
+                        const hotelResponse = await pazlApi.apiRequest<any>(`/hotels/${mappedHotel.pazl_id}`);
+
+                        let hotelData = null;
+                        if (hotelResponse?.data) {
+                            hotelData = hotelResponse.data;
+                        } else if (hotelResponse?.id) {
+                            hotelData = hotelResponse;
+                        }
+
+                        if (hotelData) {
+                            const hotelPayload = {
+                                ...hotelData,
+                                photos: uploadedHotelPhotos
+                            };
+
+                            const updateResult = await pazlApi.apiRequest(`/hotels/${mappedHotel.pazl_id}`, {
+                                method: 'PUT',
+                                body: { payload: JSON.stringify(hotelPayload) }
+                            });
+
+                            if (updateResult) {
+                                console.log(`        ✅ Отель обновлён с фото`);
+                            } else {
+                                console.log(`        ❌ Ошибка обновления отеля`);
+                            }
+                        } else {
+                            console.log(`        ⚠️ Не удалось получить данные отеля`);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Файлы документов
+    const filesPaths = downloadedFiles.get('04_files') || [];
+    if (filesPaths.length > 0) {
+        console.log(`\n  📄 Загрузка файлов документов (${filesPaths.length})`);
+        for (const filePath of filesPaths) {
+            if (fs.existsSync(filePath)) {
+                console.log(`    📤 ${path.basename(filePath)}`);
+                const fileData = await pazlApi.uploadFileToTemp('/tours/files', filePath, '3');
+                if (fileData) {
+                    tourFiles.push({
+                        localPath: filePath,
+                        pazlFileId: null,
+                        pazlFilePath: fileData.path,
+                        pazlFileName: fileData.name,
+                        category: 'tour_file'
+                    });
+                    console.log(`      ✅ Загружено`);
+                } else {
+                    console.log(`      ❌ Ошибка загрузки`);
+                }
+            }
+        }
+    }
+
+    const totalUploaded = mainPhotos.length +
+        Array.from(dayPhotos.values()).reduce((sum, arr) => sum + arr.length, 0) +
+        hotelPhotosCount +
+        tourFiles.length;
+
+    console.log(`\n  📊 Всего загружено: ${totalUploaded}`);
+    console.log(`     Основные фото: ${mainPhotos.length}`);
+    console.log(`     Фото дней: ${Array.from(dayPhotos.values()).reduce((sum, arr) => sum + arr.length, 0)} (в ${dayPhotos.size} днях)`);
+    console.log(`     Фото отелей: ${hotelPhotosCount}`);
+    console.log(`     Файлы: ${tourFiles.length}`);
+
+    if (sessionId) sendSSE(sessionId, 'step', { step: 4, status: 'active', message: `Загружено ${totalUploaded} файлов` });
+
+    return { mainPhotos, dayPhotos, hotelPhotosCount, tourFiles };
+}
+
+// ============================================
 // СОЗДАНИЕ ТУРА
 // ============================================
 
@@ -1801,13 +2458,31 @@ async function createTour(
     pazlApi: PazlApiClient,
     tourData: any,
     mappings: any,
+    uploadedFiles: {
+        mainPhotos: UploadedFile[],
+        dayPhotos: Map<number, UploadedFile[]>,
+        hotelPhotosCount: number,
+        tourFiles: UploadedFile[]
+    },
     sessionId?: string
-): Promise<boolean> {
+): Promise<{ success: boolean; tourId?: number }> {
     if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'active', message: 'Формирование данных тура...' });
 
     console.log('\n' + '='.repeat(80));
     console.log('🎯 СОЗДАНИЕ ТУРА В PAZL TOURS');
     console.log('='.repeat(80));
+
+    // Проверяем, существует ли уже тур с таким именем
+    console.log(`\n  🔍 Проверка существующего тура...`);
+    let existingTourId: number | null = null;
+    const existingTour = await pazlApi.findEntity('/tours', tourData.name);
+    if (existingTour) {
+        existingTourId = existingTour.id;
+        console.log(`  ⚠️ Тур "${tourData.name}" уже существует (ID: ${existingTourId})`);
+        console.log(`  🔄 Будет использован PUT для обновления`);
+    } else {
+        console.log(`  ✅ Тур не найден, будет создан новый (POST)`);
+    }
 
     let category = mappings.tour_categories.find((c: MappedEntity) => c.source_id === tourData.category_id);
 
@@ -1954,22 +2629,32 @@ async function createTour(
     if (dates.length === 0) {
         console.log(`  ❌ Нет будущих дат, тур не создан`);
         if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'error', message: 'Нет будущих дат тура' });
-        return false;
+        return { success: false };
     }
 
+    // Дни тура с фото
     const days: any[] = [];
     if (tourData.days && tourData.days.length > 0) {
-        for (const day of tourData.days) {
+        for (let dayIndex = 0; dayIndex < tourData.days.length; dayIndex++) {
+            const day = tourData.days[dayIndex];
+            const dayPhotosArray = uploadedFiles.dayPhotos.get(dayIndex) || [];
+
             days.push({
                 name: day.name || "День",
                 description: day.description || "",
-                photos: []
+                photos: dayPhotosArray
+                    .filter(f => f.pazlFilePath)
+                    .map(f => ({
+                        path: f.pazlFilePath,
+                        name: f.pazlFileName || path.basename(f.localPath),
+                        type: '1'
+                    }))
             });
         }
-    } else if (tourData.description) {
+    } else {
         days.push({
             name: "День 1",
-            description: tourData.description,
+            description: tourData.description || "",
             photos: []
         });
     }
@@ -2063,8 +2748,38 @@ async function createTour(
         }
     }
 
+    // Собираем фото и файлы
+    const tourPhotos: any[] = [];
+    const tourFilesForPayload: any[] = [];
+
+    // Основные фото
+    for (const file of uploadedFiles.mainPhotos) {
+        if (file.pazlFilePath) {
+            tourPhotos.push({
+                path: file.pazlFilePath,
+                name: file.pazlFileName || path.basename(file.localPath),
+                type: '1'
+            });
+        }
+    }
+
+    // Файлы документов
+    for (const file of uploadedFiles.tourFiles) {
+        if (file.pazlFilePath) {
+            tourFilesForPayload.push({
+                path: file.pazlFilePath,
+                name: file.pazlFileName || path.basename(file.localPath),
+                type: '3'
+            });
+        }
+    }
+
+    console.log(`\n  🖼️ Основные фото тура: ${tourPhotos.length}`);
+    console.log(`  📅 Дней с фото: ${uploadedFiles.dayPhotos.size}`);
+    console.log(`  📄 Файлов тура: ${tourFilesForPayload.length}`);
+
     const tourPayload = {
-        id: null,
+        id: existingTourId || null,
         name: tourData.name,
         is_active: tourData.is_active || false,
         is_hotel_selection: false,
@@ -2081,8 +2796,8 @@ async function createTour(
         additional_services: additionalServices,
         catalog_sections: catalogSections,
         trade_offers: tradeOffers,
-        photos: [],
-        files: [],
+        photos: tourPhotos,
+        files: tourFilesForPayload,
         videos: [],
         short_description: tourData.short_description || "",
         description: tourData.description || "",
@@ -2116,16 +2831,28 @@ async function createTour(
     if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'active', message: 'Отправка тура в Pazl Tours...' });
     console.log('\n  📤 Отправка данных тура...');
 
-    const result = await pazlApi.apiRequest('/tours', { method: 'POST', body: { payload: JSON.stringify(tourPayload) } });
+    let result;
+    if (existingTourId) {
+        result = await pazlApi.apiRequest(`/tours/${existingTourId}`, {
+            method: 'PUT',
+            body: { payload: JSON.stringify(tourPayload) }
+        });
+    } else {
+        result = await pazlApi.apiRequest('/tours', {
+            method: 'POST',
+            body: { payload: JSON.stringify(tourPayload) }
+        });
+    }
 
     if (result) {
-        console.log('  ✅ Тур успешно создан!');
-        if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'completed', message: 'Тур успешно создан!' });
-        return true;
+        const tourId = existingTourId || result?.data?.id || result?.id || null;
+        console.log(`  ✅ Тур успешно ${existingTourId ? 'обновлён' : 'создан'}! (ID: ${tourId || 'неизвестен'})`);
+        if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'completed', message: `Тур успешно ${existingTourId ? 'обновлён' : 'создан'}!` });
+        return { success: true, tourId: tourId || undefined };
     } else {
-        console.log('  ❌ Ошибка при создании тура');
-        if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'error', message: 'Ошибка при создании тура' });
-        return false;
+        console.log(`  ❌ Ошибка при ${existingTourId ? 'обновлении' : 'создании'} тура`);
+        if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'error', message: 'Ошибка при создании/обновлении тура' });
+        return { success: false };
     }
 }
 
@@ -2144,13 +2871,11 @@ router.get('/stream/:sessionId', (req: Request, res: Response) => {
 
     res.write(`event: connected\ndata: ${JSON.stringify({ sessionId })}\n\n`);
 
-    // Сохраняем res и отправляем накопленные логи
     const session = sessions.get(sessionId);
     if (session) {
         session.res = res;
         console.log(`✅ SSE res установлен для сессии: ${sessionId}`);
 
-        // Отправляем все накопленные события
         if (session.log.length > 0) {
             console.log(`📤 Отправка ${session.log.length} накопленных событий для ${sessionId}`);
             for (const logEntry of session.log) {
@@ -2193,10 +2918,8 @@ router.post('/start', async (req: Request, res: Response) => {
 
     console.log(`🆕 Создана сессия миграции: ${sessionId}`);
 
-    // Сразу возвращаем sessionId, не ждём SSE
     res.json({ success: true, data: { sessionId } });
 
-    // Запускаем миграцию асинхронно
     runMigration(sessionId, aviannaEmail, aviannaPassword, pazlEmail, pazlPassword, tourName).catch(err => {
         console.error('Migration error:', err);
         const session = sessions.get(sessionId);
@@ -2219,6 +2942,7 @@ async function runMigration(
     tourName: string
 ) {
     let browser: any = null;
+    let baseDownloadDir: string = '';
 
     try {
         sendSSE(sessionId, 'step', { step: 0, status: 'active', message: 'Запуск браузера...' });
@@ -2253,7 +2977,7 @@ async function runMigration(
         console.log('✅ Вход в Avianna выполнен!');
         const aviannaApi = new AviannaApiClient(aviannaPage);
 
-        // Шаг 1: Поиск и загрузка тура
+        // Шаг 1: Поиск, загрузка тура и скачивание файлов
         sendSSE(sessionId, 'step', { step: 1, status: 'active', message: `Поиск тура: "${tourName}"` });
         console.log(`🔍 Поиск тура: "${tourName}"`);
 
@@ -2276,6 +3000,13 @@ async function runMigration(
             return;
         }
 
+        // Скачиваем фото из Avianna
+        const safeTourName = sanitizeFolderName(tourData.name);
+        baseDownloadDir = path.join(process.cwd(), 'downloads', `tour_${tourData.id}_${safeTourName}`);
+
+        sendSSE(sessionId, 'step', { step: 1, status: 'active', message: 'Скачивание файлов из Avianna...' });
+        const downloadedFiles = await downloadAllPhotosFromAvianna(tourData, baseDownloadDir, sessionId);
+
         await aviannaPage.close();
         console.log('✅ Данные Avianna загружены, страница закрыта');
 
@@ -2289,6 +3020,7 @@ async function runMigration(
         if (!pazlLoggedIn) {
             sendSSE(sessionId, 'step', { step: 2, status: 'error', message: 'Неверный email или пароль Pazl Tours' });
             await browser.close();
+            cleanupDownloadedFiles(baseDownloadDir);
             return;
         }
 
@@ -2299,14 +3031,21 @@ async function runMigration(
         // Шаг 3: Маппинг
         const { mappings, stats } = await performMapping(pazlApi, tourData, sessionId);
 
-        // Шаг 4: Создание сущностей
+        // Шаг 4: Создание сущностей + загрузка файлов
         const createdEntities = await createMissingEntities(pazlApi, mappings, tourData, sessionId);
 
+        // Загружаем файлы в Pazl
+        sendSSE(sessionId, 'step', { step: 4, status: 'active', message: 'Загрузка файлов в Pazl...' });
+        const uploadedFiles = await uploadFilesToPazl(pazlApi, downloadedFiles, mappings, tourData, sessionId);
+
         // Шаг 5: Создание тура
-        const tourCreated = await createTour(pazlApi, tourData, mappings, sessionId);
+        const tourResult = await createTour(pazlApi, tourData, mappings, uploadedFiles, sessionId);
 
         await browser.close();
         console.log('✅ Браузер закрыт');
+
+        // ОЧИСТКА скачанных файлов
+        cleanupDownloadedFiles(baseDownloadDir);
 
         // Финальный результат
         const resultData = {
@@ -2321,19 +3060,33 @@ async function runMigration(
                     total: stats.totalToCreate + stats.totalExists,
                     created: createdEntities.size
                 },
-                tourCreated,
-                message: tourCreated ? 'Тур успешно создан!' : 'Маппинг выполнен, но тур не создан'
+                tourCreated: tourResult.success,
+                tourId: tourResult.tourId || null,
+                filesUploaded: {
+                    mainPhotos: uploadedFiles.mainPhotos.length,
+                    dayPhotos: Array.from(uploadedFiles.dayPhotos.values()).reduce((sum, arr) => sum + arr.length, 0),
+                    hotelPhotos: uploadedFiles.hotelPhotosCount,
+                    tourFiles: uploadedFiles.tourFiles.length
+                },
+                message: tourResult.success
+                    ? `Тур успешно создан! (ID: ${tourResult.tourId || 'неизвестен'})`
+                    : 'Маппинг выполнен, но тур не создан'
             }
         };
 
         sendSSE(sessionId, 'result', resultData);
         console.log('📤 Результат отправлен через SSE');
+        console.log('🧹 Временные файлы очищены');
 
     } catch (error: any) {
         console.error('❌ Ошибка миграции:', error);
         sendSSE(sessionId, 'error', { message: error.message || 'Внутренняя ошибка' });
         if (browser) {
             try { await browser.close(); } catch (e) {}
+        }
+        // Очистка при ошибке
+        if (baseDownloadDir) {
+            cleanupDownloadedFiles(baseDownloadDir);
         }
     }
 }
@@ -2355,6 +3108,7 @@ router.post('/', async (req: Request, res: Response) => {
     console.log(`🎯 Тур: "${tourName}"`);
 
     let browser: any = null;
+    let baseDownloadDir: string = '';
 
     try {
         browser = await chromium.launch({
@@ -2394,6 +3148,11 @@ router.post('/', async (req: Request, res: Response) => {
             return res.status(500).json({ success: false, error: 'Не удалось загрузить данные' });
         }
 
+        // Скачиваем фото
+        const safeTourName = sanitizeFolderName(tourData.name);
+        baseDownloadDir = path.join(process.cwd(), 'downloads', `tour_${tourData.id}_${safeTourName}`);
+        const downloadedFiles = await downloadAllPhotosFromAvianna(tourData, baseDownloadDir);
+
         await aviannaPage.close();
 
         const pazlPage = await context.newPage();
@@ -2401,15 +3160,18 @@ router.post('/', async (req: Request, res: Response) => {
 
         if (!pazlLoggedIn) {
             await browser.close();
+            cleanupDownloadedFiles(baseDownloadDir);
             return res.status(401).json({ success: false, error: 'Ошибка входа в Pazl' });
         }
 
         const pazlApi = new PazlApiClient(pazlPage);
         const { mappings, stats } = await performMapping(pazlApi, tourData);
         const createdEntities = await createMissingEntities(pazlApi, mappings, tourData);
-        const tourCreated = await createTour(pazlApi, tourData, mappings);
+        const uploadedFiles = await uploadFilesToPazl(pazlApi, downloadedFiles, mappings, tourData);
+        const tourResult = await createTour(pazlApi, tourData, mappings, uploadedFiles);
 
         await browser.close();
+        cleanupDownloadedFiles(baseDownloadDir);
 
         res.json({
             success: true,
@@ -2423,14 +3185,24 @@ router.post('/', async (req: Request, res: Response) => {
                     total: stats.totalToCreate + stats.totalExists,
                     created: createdEntities.size
                 },
-                tourCreated,
-                message: tourCreated ? 'Тур успешно создан!' : 'Маппинг выполнен, но тур не создан'
+                tourCreated: tourResult.success,
+                tourId: tourResult.tourId || null,
+                filesUploaded: {
+                    mainPhotos: uploadedFiles.mainPhotos.length,
+                    dayPhotos: Array.from(uploadedFiles.dayPhotos.values()).reduce((sum, arr) => sum + arr.length, 0),
+                    hotelPhotos: uploadedFiles.hotelPhotosCount,
+                    tourFiles: uploadedFiles.tourFiles.length
+                },
+                message: tourResult.success ? 'Тур успешно создан!' : 'Маппинг выполнен, но тур не создан'
             }
         });
 
     } catch (error: any) {
         console.error('❌ ОШИБКА:', error);
         if (browser) { try { await browser.close(); } catch (e) {} }
+        if (baseDownloadDir) {
+            cleanupDownloadedFiles(baseDownloadDir);
+        }
         res.status(500).json({ success: false, error: error.message || 'Внутренняя ошибка сервера' });
     }
 });
