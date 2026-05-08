@@ -145,7 +145,9 @@ async function downloadFileNode(downloadUrl: string, savePath: string, retries =
                     });
 
                     fileStream.on('error', (error) => {
-                        fs.unlinkSync(savePath);
+                        if (fs.existsSync(savePath)) {
+                            fs.unlinkSync(savePath);
+                        }
                         reject(error);
                     });
 
@@ -338,7 +340,6 @@ async function downloadAllPhotosFromAvianna(
     let downloadedCount = 0;
     let failedCount = 0;
 
-    // Отправляем общее количество для прогресса
     if (sessionId) sendSSE(sessionId, 'step', {
         step: 1,
         status: 'active',
@@ -459,7 +460,7 @@ class AviannaApiClient {
                         return null;
                     }
                 }, fullUrl),
-                new Promise((_, reject) =>
+                new Promise<null>((_, reject) =>
                     setTimeout(() => reject(new Error('Avianna API timeout')), 35000)
                 )
             ]);
@@ -817,7 +818,7 @@ class PazlApiClient {
                     fetchBody: options?.body,
                     xsrfToken: this.xsrfToken
                 }),
-                new Promise((_, reject) =>
+                new Promise<null>((_, reject) =>
                     setTimeout(() => reject(new Error('Pazl API timeout')), 35000)
                 )
             ]);
@@ -845,15 +846,29 @@ class PazlApiClient {
             const fileBuffer = fs.readFileSync(filePath);
             const base64Data = fileBuffer.toString('base64');
 
-            const result = await this.page.evaluate(async ({ fetchUrl, fileBase64, fileName, xsrfToken, fileType }) => {
-                const byteCharacters = atob(fileBase64);
+            const evaluateParams = {
+                fetchUrl: fullUrl,
+                fileBase64: base64Data,
+                fileName: fileName,
+                xsrfToken: this.xsrfToken,
+                fileType: fileType
+            };
+
+            const result = await this.page.evaluate(async (params: {
+                fetchUrl: string;
+                fileBase64: string;
+                fileName: string;
+                xsrfToken: string;
+                fileType: string;
+            }) => {
+                const byteCharacters = atob(params.fileBase64);
                 const byteNumbers = new Array(byteCharacters.length);
                 for (let i = 0; i < byteCharacters.length; i++) {
                     byteNumbers[i] = byteCharacters.charCodeAt(i);
                 }
                 const byteArray = new Uint8Array(byteNumbers);
 
-                const ext = fileName.split('.').pop()?.toLowerCase() || '';
+                const ext = params.fileName.split('.').pop()?.toLowerCase() || '';
                 const mimeTypes: Record<string, string> = {
                     'jpg': 'image/jpeg',
                     'jpeg': 'image/jpeg',
@@ -868,17 +883,17 @@ class PazlApiClient {
 
                 const blob = new Blob([byteArray], { type: mimeType });
                 const formData = new FormData();
-                formData.append('file', blob, fileName);
-                if (fileType) {
-                    formData.append('type', fileType);
+                formData.append('file', blob, params.fileName);
+                if (params.fileType) {
+                    formData.append('type', params.fileType);
                 }
 
-                const response = await fetch(fetchUrl, {
+                const response = await fetch(params.fetchUrl, {
                     method: 'POST',
                     headers: {
                         'Accept': 'application/json',
                         'X-Requested-With': 'XMLHttpRequest',
-                        'X-XSRF-TOKEN': xsrfToken
+                        'X-XSRF-TOKEN': params.xsrfToken
                     },
                     credentials: 'include',
                     body: formData
@@ -903,13 +918,7 @@ class PazlApiClient {
                 } catch {
                     return { status: 'OK', data: text };
                 }
-            }, {
-                fetchUrl: fullUrl,
-                fileBase64: base64Data,
-                fileName: fileName,
-                xsrfToken: this.xsrfToken,
-                fileType: fileType
-            });
+            }, evaluateParams);
 
             if (result?.__error) {
                 console.log(`      ❌ Upload Error ${result.__status}: ${result.__body}`);
@@ -2378,10 +2387,10 @@ async function uploadFilesToPazl(
 
                         const hotelResponse = await pazlApi.apiRequest<any>(`/hotels/${mappedHotel.pazl_id}`);
 
-                        let hotelData = null;
+                        let hotelData: any = null;
                         if (hotelResponse?.data) {
                             hotelData = hotelResponse.data;
-                        } else if (hotelResponse?.id) {
+                        } else if ((hotelResponse as any)?.id) {
                             hotelData = hotelResponse;
                         }
 
@@ -2845,7 +2854,8 @@ async function createTour(
     }
 
     if (result) {
-        const tourId = existingTourId || result?.data?.id || result?.id || null;
+        const resultAny = result as any;
+        const tourId = existingTourId || resultAny?.data?.id || resultAny?.id || null;
         console.log(`  ✅ Тур успешно ${existingTourId ? 'обновлён' : 'создан'}! (ID: ${tourId || 'неизвестен'})`);
         if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'completed', message: `Тур успешно ${existingTourId ? 'обновлён' : 'создан'}!` });
         return { success: true, tourId: tourId || undefined };
