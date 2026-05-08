@@ -2259,7 +2259,8 @@ async function uploadFilesToPazl(
     dayPhotos: Map<number, UploadedFile[]>,
     hotelPhotosCount: number,
     tourFiles: UploadedFile[]
-}> {
+}>
+{
     if (sessionId) sendSSE(sessionId, 'step', { step: 4, status: 'active', message: 'Загрузка файлов в Pazl Tours...' });
 
     console.log('\n' + '='.repeat(80));
@@ -2853,11 +2854,52 @@ async function createTour(
         });
     }
 
+    // Логируем сырой ответ для отладки
+    console.log('  📦 Ответ Pazl API:', JSON.stringify(result).substring(0, 500));
+
     if (result) {
         const resultAny = result as any;
-        const tourId = existingTourId || resultAny?.data?.id || resultAny?.id || null;
+
+        // Пробуем достать ID из разных мест
+        let tourId: number | null = existingTourId || null;
+
+        if (!tourId && resultAny?.data?.id) {
+            tourId = resultAny.data.id;
+        }
+        if (!tourId && resultAny?.data?.tour?.id) {
+            tourId = resultAny.data.tour.id;
+        }
+        if (!tourId && resultAny?.id) {
+            tourId = resultAny.id;
+        }
+        if (!tourId && resultAny?.tour?.id) {
+            tourId = resultAny.tour.id;
+        }
+
+        // Если результат просто содержит ID как число
+        if (!tourId && typeof resultAny?.data === 'number') {
+            tourId = resultAny.data;
+        }
+        if (!tourId && typeof resultAny === 'number') {
+            tourId = resultAny;
+        }
+
+        // Последняя попытка — поискать существующий тур по имени
+        if (!tourId) {
+            console.log('  🔍 ID не найден в ответе, ищем тур по имени...');
+            const foundTour = await pazlApi.findEntity('/tours', tourData.name);
+            if (foundTour) {
+                tourId = foundTour.id;
+                console.log(`  ✅ Тур найден по имени: ID ${tourId}`);
+            }
+        }
+
         console.log(`  ✅ Тур успешно ${existingTourId ? 'обновлён' : 'создан'}! (ID: ${tourId || 'неизвестен'})`);
-        if (sessionId) sendSSE(sessionId, 'step', { step: 5, status: 'completed', message: `Тур успешно ${existingTourId ? 'обновлён' : 'создан'}!` });
+        if (sessionId) sendSSE(sessionId, 'step', {
+            step: 5,
+            status: 'completed',
+            message: `Тур успешно ${existingTourId ? 'обновлён' : 'создан'}!${tourId ? ` ID: ${tourId}` : ''}`
+        });
         return { success: true, tourId: tourId || undefined };
     } else {
         console.log(`  ❌ Ошибка при ${existingTourId ? 'обновлении' : 'создании'} тура`);

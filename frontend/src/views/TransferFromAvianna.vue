@@ -171,6 +171,25 @@
             </div>
           </div>
 
+          <div class="stats-container">
+            <div class="stat-card total">
+              <div class="stat-value">{{ result.stats.total }}</div>
+              <div class="stat-label">Всего сущностей</div>
+            </div>
+            <div class="stat-card exists">
+              <div class="stat-value">{{ result.stats.totalExists }}</div>
+              <div class="stat-label">Найдено в Pazl</div>
+            </div>
+            <div class="stat-card create">
+              <div class="stat-value">{{ result.stats.totalToCreate }}</div>
+              <div class="stat-label">Требовалось создать</div>
+            </div>
+            <div class="stat-card created">
+              <div class="stat-value">{{ result.stats.created }}</div>
+              <div class="stat-label">Успешно создано</div>
+            </div>
+          </div>
+
           <div v-if="result.filesUploaded" class="section-block">
             <h3>📸 Загруженные файлы</h3>
             <div class="stats-container stats-files">
@@ -190,25 +209,6 @@
                 <div class="stat-value">{{ result.filesUploaded.tourFiles }}</div>
                 <div class="stat-label">Файлы</div>
               </div>
-            </div>
-          </div>
-
-          <div class="stats-container">
-            <div class="stat-card total">
-              <div class="stat-value">{{ result.stats.total }}</div>
-              <div class="stat-label">Всего сущностей</div>
-            </div>
-            <div class="stat-card exists">
-              <div class="stat-value">{{ result.stats.totalExists }}</div>
-              <div class="stat-label">Найдено в Pazl</div>
-            </div>
-            <div class="stat-card create">
-              <div class="stat-value">{{ result.stats.totalToCreate }}</div>
-              <div class="stat-label">Требовалось создать</div>
-            </div>
-            <div class="stat-card created">
-              <div class="stat-value">{{ result.stats.created }}</div>
-              <div class="stat-label">Успешно создано</div>
             </div>
           </div>
 
@@ -336,12 +336,12 @@ const steps = reactive<Step[]>([
 ]);
 
 const stepMapping: Record<number, number> = {
-  0: 0,  // Запуск браузера
-  1: 1,  // Поиск и загрузка тура (включает Avianna вход + загрузка + скачивание)
-  2: 2,  // Вход в Pazl
-  3: 3,  // Маппинг
-  4: 4,  // Создание сущностей + загрузка файлов
-  5: 5,  // Создание тура
+  0: 0,
+  1: 1,
+  2: 2,
+  3: 3,
+  4: 4,
+  5: 5,
 };
 
 const hasError = computed(() => {
@@ -490,7 +490,6 @@ async function startMigration(): Promise<void> {
         result.value = res;
         progressPercent.value = 100;
 
-        // Отмечаем все не-completed шаги как completed
         steps.forEach(step => {
           if (step.status !== 'completed' && step.status !== 'error') {
             step.status = 'completed';
