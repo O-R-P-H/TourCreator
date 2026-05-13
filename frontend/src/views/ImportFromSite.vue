@@ -108,7 +108,7 @@
                 <label>Сопоставить как:</label>
                 <select
                     v-model="matchMap[block.id]"
-                    @change="onMatchChange(block.id, $event)"
+                    @change="onMatchChange(block.id)"
                     class="match-select"
                 >
                   <option value="">— Не сопоставлено —</option>
@@ -120,12 +120,11 @@
                   <option value="price">💰 Цена</option>
                 </select>
 
-                <!-- Доп. поле для названия -->
                 <input
                     v-if="matchMap[block.id]"
                     v-model="matchNames[block.id]"
                     type="text"
-                    :placeholder="getPlaceholder(matchMap[block.id])"
+                    :placeholder="getPlaceholder(matchMap[block.id] || '')"
                     class="match-name-input"
                 />
               </div>
@@ -239,7 +238,6 @@
 <script setup lang="ts">
 import { ref, computed, reactive } from 'vue';
 import { useRouter } from 'vue-router';
-import apiService from '@/services/api.service';
 import { config } from '@/config';
 
 const router = useRouter();
@@ -308,16 +306,17 @@ function getPlaceholder(entityType: string): string {
 }
 
 function toggleBlock(blockId: string) {
-  if (expandedBlocks.value.has(blockId)) {
-    expandedBlocks.value.delete(blockId);
+  const newSet = new Set(expandedBlocks.value);
+  if (newSet.has(blockId)) {
+    newSet.delete(blockId);
   } else {
-    expandedBlocks.value.add(blockId);
+    newSet.add(blockId);
   }
+  expandedBlocks.value = newSet;
 }
 
-function onMatchChange(blockId: string, event: Event) {
-  const value = (event.target as HTMLSelectElement).value;
-  if (!value) {
+function onMatchChange(blockId: string) {
+  if (!matchMap.value[blockId]) {
     delete matchNames.value[blockId];
   }
 }
@@ -349,12 +348,14 @@ async function parseUrl() {
 
     // Авто-сопоставление по типам
     if (parsedData.value.blocks) {
+      const newMatchMap: Record<string, string> = {};
       for (const block of parsedData.value.blocks) {
-        if (block.type === 'hotel') matchMap.value[block.id] = 'hotel';
-        else if (block.type === 'transport') matchMap.value[block.id] = 'transport';
-        else if (block.type === 'service') matchMap.value[block.id] = 'service';
-        else if (block.type === 'day' || block.type === 'program') matchMap.value[block.id] = 'day';
+        if (block.type === 'hotel') newMatchMap[block.id] = 'hotel';
+        else if (block.type === 'transport') newMatchMap[block.id] = 'transport';
+        else if (block.type === 'service') newMatchMap[block.id] = 'service';
+        else if (block.type === 'day' || block.type === 'program') newMatchMap[block.id] = 'day';
       }
+      matchMap.value = newMatchMap;
     }
 
   } catch (err: any) {
@@ -380,12 +381,15 @@ async function startMigration() {
   // Формируем matchedEntities
   const matchedEntities = Object.entries(matchMap.value)
       .filter(([_, type]) => type)
-      .map(([blockId, entityType]) => ({
-        blockId,
-        entityType,
-        name: matchNames.value[blockId] || parsedData.value.blocks.find((b: any) => b.id === blockId)?.title || '',
-        data: parsedData.value.blocks.find((b: any) => b.id === blockId)?.content || '',
-      }));
+      .map(([blockId, entityType]) => {
+        const block = parsedData.value?.blocks?.find((b: any) => b.id === blockId);
+        return {
+          blockId,
+          entityType,
+          name: matchNames.value[blockId] || block?.title || '',
+          data: block?.content || '',
+        };
+      });
 
   try {
     const response = await fetch(`${config.apiUrl}/api/external/create`, {
@@ -415,9 +419,12 @@ async function startMigration() {
     eventSource.addEventListener('step', (event: Event) => {
       const msgEvent = event as MessageEvent;
       const stepData = JSON.parse(msgEvent.data);
-      if (stepData.step !== undefined && steps[stepData.step]) {
-        steps[stepData.step].status = stepData.status;
-        steps[stepData.step].message = stepData.message;
+      if (stepData.step !== undefined && stepData.step >= 0 && stepData.step < steps.length) {
+        const step = steps[stepData.step];
+        if (step) {
+          step.status = stepData.status;
+          step.message = stepData.message;
+        }
       }
       const completed = steps.filter(s => s.status === 'completed').length;
       progressPercent.value = Math.round((completed / steps.length) * 100);
