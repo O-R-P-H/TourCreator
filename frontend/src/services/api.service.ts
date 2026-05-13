@@ -75,7 +75,15 @@ class ApiService {
 
         return response.data;
     }
+    async parseExternalPage(url: string): Promise<any> {
+        const response = await axios.post(`${API_BASE_URL}/external/parse`, { url }, { withCredentials: true });
+        return response.data;
+    }
 
+    async createExternalTour(data: any): Promise<{ sessionId: string }> {
+        const response = await axios.post(`${API_BASE_URL}/external/create`, data, { withCredentials: true });
+        return response.data.data;
+    }
     // Новый метод - запуск миграции и получение sessionId
     async startMigrationSession(data: MigrationRequest): Promise<{ sessionId: string }> {
         const response = await axios.post<ApiResponse<{ sessionId: string }>>(

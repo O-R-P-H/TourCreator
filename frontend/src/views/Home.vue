@@ -13,7 +13,7 @@
       </div>
 
       <div class="actions-grid">
-        <div class="action-card" @click="navigateTo('/simple-create')">
+        <div class="action-card disable" @click="navigateTo('/simple-create')">
           <div class="card-icon">⚡</div>
           <h3>Упрощенное создание</h3>
           <p>Быстрое создание тура с минимальными настройками</p>
@@ -54,6 +54,10 @@ const logout = () => {
 </script>
 
 <style scoped>
+.disable{
+  cursor: not-allowed;
+  backdrop-filter: brightness(0.5);
+}
 .home {
   min-height: 100vh;
   background: #0f0f0f;
