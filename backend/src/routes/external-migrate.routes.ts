@@ -134,6 +134,92 @@ function socks5TunnelRequest(options: {
 }): Promise<{ status: number; data: string }> {
     return new Promise((resolve, reject) => {
         const socket = net.connect(1080, '127.0.0.1');
+        let buffer = Buffer.alloc(0);
+        let responseData = '';
+        let state: 'handshake' | 'connect' | 'http' = 'handshake';
+        let contentLength = -1;
+        let headerEnd = -1;
+
+        socket.on('connect', () => {
+            socket.write(Buffer.from([0x05, 0x01, 0x00]));
+        });
+
+        socket.on('data', (data: Buffer) => {
+            if (state === 'handshake') {
+                // Ответ на SOCKS5 handshake
+                if (data[0] === 0x05 && data[1] === 0x00) {
+                    state = 'connect';
+                    const hostBuffer = Buffer.from(options.host, 'utf8');
+                    const packet = Buffer.alloc(7 + hostBuffer.length);
+                    packet[0] = 0x05; packet[1] = 0x01; packet[2] = 0x00; packet[3] = 0x03;
+                    packet[4] = hostBuffer.length;
+                    hostBuffer.copy(packet, 5);
+                    packet.writeUInt16BE(options.port, 5 + hostBuffer.length);
+                    socket.write(packet);
+                } else {
+                    reject(new Error(`SOCKS5 handshake failed: ${data.toString('hex')}`));
+                }
+            } else if (state === 'connect') {
+                // Ответ на CONNECT
+                if (data[0] === 0x05 && data[1] === 0x00) {
+                    state = 'http';
+                    const requestLines = [
+                        `${options.method} ${options.path} HTTP/1.1`,
+                        `Host: ${options.host}`,
+                        ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
+                        `Content-Length: ${Buffer.byteLength(options.body)}`,
+                        'Connection: close',
+                        '',
+                        options.body,
+                    ];
+                    socket.write(requestLines.join('\r\n'));
+                } else {
+                    reject(new Error(`SOCKS5 connect failed: ${data.toString('hex')}`));
+                }
+            } else if (state === 'http') {
+                responseData += data.toString();
+
+                if (headerEnd === -1) {
+                    headerEnd = responseData.indexOf('\r\n\r\n');
+                }
+
+                if (headerEnd !== -1) {
+                    // Парсим заголовки для Content-Length
+                    const headers = responseData.substring(0, headerEnd);
+                    const clMatch = headers.match(/Content-Length: (\d+)/i);
+                    if (clMatch) contentLength = parseInt(clMatch[1]);
+
+                    // Проверяем получено ли всё тело
+                    const bodyStart = headerEnd + 4;
+                    if (contentLength > 0 && responseData.length - bodyStart >= contentLength) {
+                        const statusMatch = headers.match(/HTTP\/\d\.\d (\d+)/);
+                        resolve({
+                            status: statusMatch ? parseInt(statusMatch[1]) : 200,
+                            data: responseData.substring(bodyStart)
+                        });
+                    }
+                }
+            }
+        });
+
+        socket.on('error', reject);
+        socket.on('close', () => {
+            if (responseData) {
+                const hEnd = responseData.indexOf('\r\n\r\n');
+                if (hEnd !== -1) {
+                    const statusMatch = responseData.substring(0, hEnd).match(/HTTP\/\d\.\d (\d+)/);
+                    resolve({
+                        status: statusMatch ? parseInt(statusMatch[1]) : 200,
+                        data: responseData.substring(hEnd + 4)
+                    });
+                }
+            }
+        });
+
+        setTimeout(() => reject(new Error('SOCKS5 timeout')), 30000);
+    });
+}    return new Promise((resolve, reject) => {
+        const socket = net.connect(1080, '127.0.0.1');
 
         socket.on('connect', () => {
             // SOCKS5 handshake — без авторизации
@@ -264,6 +350,18 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
 
         if (result.status !== 200) {
             console.error('❌ Gemini API error:', result.status, result.data.substring(0, 500));
+            return null;
+        }
+
+        // Логируем сырой ответ
+        console.log('📦 Raw Gemini response:', result.data.substring(0, 500));
+
+        let data: any;
+        try {
+            data = JSON.parse(result.data);
+        } catch (e: any) {
+            console.error('❌ JSON parse error:', e.message);
+            console.error('📦 Full response:', result.data);
             return null;
         }
 
