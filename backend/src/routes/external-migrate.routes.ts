@@ -120,263 +120,231 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
 
         const pageTitle = await page.title();
 
-        const blocks = await page.evaluate(() => {
-            const result: any[] = [];
-            let id = 0;
+        // Парсим через отдельные вызовы evaluate для надёжности
 
-            // Удаляем мусорные элементы перед парсингом
-            const removeSelectors = [
-                'nav', 'footer', 'header', 'script', 'style', 'noscript', 'iframe',
-                '.nav', '.menu', '.footer', '.header', '.sidebar', '.breadcrumbs',
-                '.pagination', '.social', '.copyright', '.moduletable', '.module',
-                '.mod-wrapper', '.sp-megamenu-parent', '.logo', '.search',
-                '#sp-header', '#sp-bottom', '#sp-footer', '.sp-module',
-                '[class*="menu"]', '[class*="nav"]',
-            ];
-
-            // Собираем все элементы для удаления в массив
-            const elementsToRemove: Element[] = [];
-            for (const selector of removeSelectors) {
-                try {
-                    const els = document.querySelectorAll(selector);
-                    els.forEach(el => elementsToRemove.push(el));
-                } catch (e) {
-                    // Игнорируем ошибки невалидных селекторов
-                }
+        // 1. Получаем название тура
+        const tourTitle = await page.evaluate(() => {
+            try {
+                const h1 = document.querySelector('h1, .product-title, .tour-title, .item-title, h2');
+                return h1?.textContent?.trim() || '';
+            } catch (e) {
+                return '';
             }
+        });
 
-            // Удаляем элементы
-            for (const el of elementsToRemove) {
-                try {
-                    if (el && el.parentNode) {
-                        el.parentNode.removeChild(el);
-                    }
-                } catch (e) {
-                    // Игнорируем
-                }
+        // 2. Получаем весь текст body
+        const bodyText = await page.evaluate(() => {
+            try {
+                return document.body?.textContent?.replace(/\s+/g, ' ') || '';
+            } catch (e) {
+                return '';
             }
+        });
 
-            // Ждём немного после удаления
-            // (не можем использовать setTimeout в evaluate)
-
-            // ===== ИЗВЛЕКАЕМ КОНКРЕТНЫЕ ДАННЫЕ =====
-
-            // 1. Название тура
-            const h1 = document.querySelector('h1, .product-title, .tour-title, .item-title, h2');
-            if (h1 && h1.textContent) {
-                const titleText = h1.textContent.trim();
-                if (titleText && titleText.length > 5) {
-                    result.push({
-                        id: `block_${id++}`,
-                        type: 'tour_title',
-                        title: 'Название тура',
-                        content: titleText,
-                        rawHtml: ''
-                    });
-                }
-            }
-
-            // 2. Основное описание — ищем контентную область
-            const descSelectors = [
-                '.product-description', '.tour-description', '.item-description',
-                '.entry-content', '.post-content', '[itemprop="description"]',
-                '.tab-content .active', '.sp-tab-content .active',
-                '.vm-product-details-container', '.productdetails-view',
-            ];
-
-            let contentEl: Element | null = null;
-            for (const selector of descSelectors) {
-                const el = document.querySelector(selector);
-                if (el) {
-                    contentEl = el;
-                    break;
-                }
-            }
-
-            // Если не нашли — берём body за вычетом удалённых элементов
-            if (!contentEl) {
-                contentEl = document.body;
-            }
-
-            if (contentEl) {
-                const text = (contentEl.textContent || '').trim();
-                if (text.length > 50) {
-                    // Ищем все заголовки и параграфы внутри
-                    const allElements = contentEl.querySelectorAll('h1, h2, h3, h4, h5, h6, p, strong, b, .price, .product-price, .tour-price, [class*="price"], [class*="cost"], .vm-price, .PricesalesPrice');
-                    let currentSection: { title: string; content: string } | null = null;
-                    let mainDescription = '';
-
-                    for (const el of allElements) {
-                        // Пропускаем если элемент уже удалён
-                        if (!el || !el.textContent) continue;
-
-                        const tag = el.tagName.toLowerCase();
-                        const elText = el.textContent.trim();
-                        if (!elText || elText.length < 3) continue;
-
-                        // Проверяем не скрыт ли элемент
-                        try {
-                            const style = window.getComputedStyle(el);
-                            if (style.display === 'none' || style.visibility === 'hidden') continue;
-                        } catch (e) {
-                            // Игнорируем
-                        }
-
-                        // Это заголовок секции
-                        if (['h2', 'h3', 'h4', 'h5', 'h6'].includes(tag) ||
-                            (['strong', 'b'].includes(tag) && elText.length < 150)) {
-
-                            // Сохраняем предыдущую секцию
-                            if (currentSection && currentSection.content.trim().length > 20) {
-                                const sectionType = determineSectionType(currentSection.title, currentSection.content);
-                                result.push({
-                                    id: `block_${id++}`,
-                                    type: sectionType,
-                                    title: currentSection.title,
-                                    content: currentSection.content.trim(),
-                                    rawHtml: ''
-                                });
-                            }
-                            currentSection = { title: elText, content: '' };
-                        } else {
-                            // Контент
-                            if (!currentSection) {
-                                currentSection = { title: 'Описание', content: '' };
-                            }
-                            currentSection.content += elText + '\n';
-                            mainDescription += elText + '\n';
+        // 3. Получаем цены
+        const pricesText = await page.evaluate(() => {
+            try {
+                const prices: string[] = [];
+                const selectors = '.price, .product-price, .tour-price, [class*="price"], [class*="cost"], .vm-price, .PricesalesPrice';
+                const elements = document.querySelectorAll(selectors);
+                for (let i = 0; i < elements.length; i++) {
+                    const el = elements[i];
+                    if (el?.textContent) {
+                        const text = el.textContent.trim();
+                        if (text && /[\d\s]+[₽р]/.test(text) && text.length < 200) {
+                            prices.push(text);
                         }
                     }
+                }
+                return [...new Set(prices)].join('\n');
+            } catch (e) {
+                return '';
+            }
+        });
 
-                    // Сохраняем последнюю секцию
-                    if (currentSection && currentSection.content.trim().length > 20) {
-                        const sectionType = determineSectionType(currentSection.title, currentSection.content);
-                        result.push({
-                            id: `block_${id++}`,
-                            type: sectionType,
-                            title: currentSection.title,
-                            content: currentSection.content.trim(),
-                            rawHtml: ''
-                        });
+        // 4. Получаем секции контента
+        const sections = await page.evaluate(() => {
+            try {
+                const result: any[] = [];
+
+                // Ищем контентную область
+                const contentSelectors = [
+                    '.product-description', '.tour-description', '.item-description',
+                    '.entry-content', '.post-content', '[itemprop="description"]',
+                    '.tab-content .active', '.sp-tab-content .active',
+                    '.vm-product-details-container', '.productdetails-view',
+                    '#tab-description', '.tab-pane.active',
+                ];
+
+                let contentEl: Element | null = null;
+                for (const sel of contentSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el) { contentEl = el; break; }
+                }
+
+                if (!contentEl) {
+                    // Пробуем найти основной контент по объёму текста
+                    const divs = document.querySelectorAll('div');
+                    let maxLen = 0;
+                    for (let i = 0; i < divs.length; i++) {
+                        const div = divs[i];
+                        const len = div?.textContent?.length || 0;
+                        if (len > maxLen && len < 50000) {
+                            maxLen = len;
+                            contentEl = div;
+                        }
                     }
-
-                    // Общее описание
-                    if (mainDescription.trim().length > 50) {
-                        result.push({
-                            id: `block_${id++}`,
-                            type: 'description',
-                            title: 'Полное описание',
-                            content: mainDescription.trim(),
-                            rawHtml: ''
-                        });
-                    }
                 }
-            }
 
-            // 3. Цены
-            const priceElements = document.querySelectorAll('.price, .product-price, .tour-price, [class*="price"], [class*="cost"], .vm-price, .PricesalesPrice, .variant-price');
-            const prices: string[] = [];
-            for (const el of priceElements) {
-                if (!el || !el.textContent) continue;
-                const text = el.textContent.trim();
-                if (text && /[\d\s]+[₽р]/.test(text) && !prices.includes(text) && text.length < 200) {
-                    prices.push(text);
-                }
-            }
-            if (prices.length > 0) {
-                result.push({
-                    id: `block_${id++}`,
-                    type: 'price',
-                    title: 'Цены',
-                    content: prices.join('\n'),
-                    rawHtml: ''
-                });
-            }
+                if (contentEl) {
+                    // Собираем все h2-h6 и p внутри
+                    const elements = contentEl.querySelectorAll('h2, h3, h4, h5, h6, p, strong, b, .price, [class*="price"], [class*="cost"]');
+                    let current: { title: string; content: string } = { title: 'Описание', content: '' };
 
-            // 4. Даты
-            const bodyText = (document.body.textContent || '').replace(/\s+/g, ' ');
-            const datePattern = /\d{1,2}\s*(июн[ья]?|июл[ья]?|авг[уста]*|сен[тября]*|окт[ябр]*|ноя[бр]*|дек[абр]*|янв[ар]*|фев[рал]*|мар[та]*|апр[ел]*|ма[йя])\s*,?\s*\d{4}?/gi;
-            const foundDates = bodyText.match(datePattern);
-            if (foundDates && foundDates.length > 0) {
-                const uniqueDates = [...new Set(foundDates.map(d => d.replace(/\s+/g, ' ').trim()))].slice(0, 50);
-                if (uniqueDates.length > 0) {
-                    result.push({
-                        id: `block_${id++}`,
-                        type: 'dates',
-                        title: 'Даты тура',
-                        content: uniqueDates.join(', '),
-                        rawHtml: ''
-                    });
-                }
-            }
+                    for (let i = 0; i < elements.length; i++) {
+                        const el = elements[i];
+                        if (!el) continue;
 
-            // 5. Города отправления
-            const citiesPattern = /(?:из|от|в)\s+(Анап[ы]?|Новороссийск[а]?|Геленджик[а]?|Сочи|Краснодар[а]?|Москв[ы]?|Санкт-Петербург[а]?|Казан[и]?|Екатеринбург[а]?|Ростов[а]?|Волгоград[а]?|Самар[ы]?|Нижн[его]*\s*Новгород[а]?|Воронеж[а]?|Крым[а]?|Симферопол[я]?|Ялт[ы]?|Севастопол[я]?)/gi;
-            const foundCities = bodyText.match(citiesPattern);
-            if (foundCities && foundCities.length > 0) {
-                const uniqueCities = [...new Set(foundCities.map(c => c.trim()))].slice(0, 20);
-                if (uniqueCities.length > 0) {
-                    result.push({
-                        id: `block_${id++}`,
-                        type: 'departure_cities',
-                        title: 'Города отправления',
-                        content: uniqueCities.join(', '),
-                        rawHtml: ''
-                    });
-                }
-            }
+                        const tag = el.tagName?.toLowerCase() || '';
+                        const text = el.textContent?.trim() || '';
+                        if (text.length < 3) continue;
 
-            // 6. Изображения
-            const images = document.querySelectorAll('img[src]:not([src*="icon"]):not([src*="logo"]):not([src*="data:"]):not([src*="blank"]):not([src*="placeholder"])');
-            const imageUrls: string[] = [];
-            for (const img of images) {
-                if (!img) continue;
-                const src = (img as HTMLImageElement).src;
-                const w = (img as HTMLImageElement).naturalWidth;
-                const h = (img as HTMLImageElement).naturalHeight;
-                if (src && w > 200 && h > 100 && !src.includes('icon') && !src.includes('logo')) {
-                    imageUrls.push(src);
-                }
-            }
-            if (imageUrls.length > 0) {
-                result.push({
-                    id: `block_${id++}`,
-                    type: 'images',
-                    title: 'Изображения',
-                    content: imageUrls.slice(0, 20).join('\n'),
-                    rawHtml: ''
-                });
-            }
-
-            // 7. Если ничего не нашли — fallback
-            if (result.length < 2) {
-                const allElements = document.body.querySelectorAll('p, div, span, li');
-                for (const el of allElements) {
-                    if (!el || !el.textContent) continue;
-                    const text = el.textContent.trim();
-                    if (text.length > 30 && text.length < 3000) {
-                        // Проверяем что элемент видимый
+                        // Проверяем видимость
                         try {
                             const style = window.getComputedStyle(el);
                             if (style.display === 'none' || style.visibility === 'hidden') continue;
                         } catch (e) { continue; }
 
+                        const isHeader = ['h2', 'h3', 'h4', 'h5', 'h6'].includes(tag);
+                        const isBold = (tag === 'strong' || tag === 'b') && text.length < 150;
+
+                        if (isHeader || isBold) {
+                            if (current.content.trim().length > 20) {
+                                result.push({
+                                    title: current.title,
+                                    content: current.content.trim(),
+                                    type: 'text'
+                                });
+                            }
+                            current = { title: text, content: '' };
+                        } else {
+                            current.content += text + '\n';
+                        }
+                    }
+
+                    if (current.content.trim().length > 20) {
                         result.push({
-                            id: `block_${id++}`,
-                            type: 'text',
-                            title: text.substring(0, 80),
-                            content: text,
-                            rawHtml: ''
+                            title: current.title,
+                            content: current.content.trim(),
+                            type: 'text'
                         });
                     }
                 }
-            }
 
-            return result;
+                return result;
+            } catch (e) {
+                return [];
+            }
         });
 
+        // 5. Изображения
+        const imagesText = await page.evaluate(() => {
+            try {
+                const urls: string[] = [];
+                const imgs = document.querySelectorAll('img[src]');
+                for (let i = 0; i < imgs.length; i++) {
+                    const img = imgs[i] as HTMLImageElement;
+                    if (!img?.src) continue;
+                    if (img.src.includes('icon') || img.src.includes('logo') || img.src.includes('data:') || img.src.includes('blank')) continue;
+                    if (img.naturalWidth > 200 && img.naturalHeight > 100) {
+                        urls.push(img.src);
+                    }
+                }
+                return urls.slice(0, 20).join('\n');
+            } catch (e) {
+                return '';
+            }
+        });
+
+        // 6. Даты
+        const datesPattern = /\d{1,2}\s*(июн[ья]?|июл[ья]?|авг[уста]*|сен[тября]*|окт[ябр]*|ноя[бр]*|дек[абр]*|янв[ар]*|фев[рал]*|мар[та]*|апр[ел]*|ма[йя])\s*,?\s*\d{4}?/gi;
+        const foundDates = bodyText.match(datesPattern);
+        const datesText = foundDates ? [...new Set(foundDates.map(d => d.replace(/\s+/g, ' ').trim()))].slice(0, 50).join(', ') : '';
+
+        // 7. Города
+        const citiesPattern = /(?:из|от|в)\s+(Анап[ы]?|Новороссийск[а]?|Геленджик[а]?|Сочи|Краснодар[а]?|Москв[ы]?|Санкт-Петербург[а]?|Казан[и]?|Екатеринбург[а]?|Ростов[а]?|Волгоград[а]?|Самар[ы]?|Нижн[его]*\s*Новгород[а]?|Воронеж[а]?|Крым[а]?|Симферопол[я]?|Ялт[ы]?|Севастопол[я]?)/gi;
+        const foundCities = bodyText.match(citiesPattern);
+        const citiesText = foundCities ? [...new Set(foundCities.map(c => c.trim()))].slice(0, 20).join(', ') : '';
+
+        // Собираем блоки
+        const blocks: ParsedBlock[] = [];
+        let id = 0;
+
+        if (tourTitle) {
+            blocks.push({
+                id: `block_${id++}`,
+                type: 'tour_title',
+                title: 'Название тура',
+                content: tourTitle,
+                rawHtml: ''
+            });
+        }
+
+        for (const section of sections) {
+            if (section.content.length > 30) {
+                const sectionType = determineSectionType(section.title, section.content);
+                blocks.push({
+                    id: `block_${id++}`,
+                    type: sectionType as ParsedBlock['type'],
+                    title: section.title,
+                    content: section.content.substring(0, 5000),
+                    rawHtml: ''
+                });
+            }
+        }
+
+        if (pricesText) {
+            blocks.push({
+                id: `block_${id++}`,
+                type: 'price',
+                title: 'Цены',
+                content: pricesText,
+                rawHtml: ''
+            });
+        }
+
+        if (datesText) {
+            blocks.push({
+                id: `block_${id++}`,
+                type: 'dates',
+                title: 'Даты тура',
+                content: datesText,
+                rawHtml: ''
+            });
+        }
+
+        if (citiesText) {
+            blocks.push({
+                id: `block_${id++}`,
+                type: 'departure_cities',
+                title: 'Города отправления',
+                content: citiesText,
+                rawHtml: ''
+            });
+        }
+
+        if (imagesText) {
+            blocks.push({
+                id: `block_${id++}`,
+                type: 'images',
+                title: 'Изображения',
+                content: imagesText,
+                rawHtml: ''
+            });
+        }
+
         // Удаляем дубликаты
-        const uniqueBlocks: typeof blocks = [];
+        const uniqueBlocks: ParsedBlock[] = [];
         const seenContent = new Set<string>();
         for (const block of blocks) {
             const normalized = block.content.substring(0, 100).replace(/\s+/g, ' ').trim();
@@ -403,8 +371,7 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
     } finally {
         await browser.close();
     }
-}
-// ============================================
+}// ============================================
 // РОУТЫ
 // ============================================
 
