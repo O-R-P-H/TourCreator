@@ -1,7 +1,7 @@
 // src/routes/external-migrate.routes.ts
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
-import { HttpsProxyAgent } from 'https-proxy-agent';
+import * as net from 'net';
 
 const router = Router();
 
@@ -88,22 +88,11 @@ interface AIParsedTour {
             commission_child_sum: number;
         }[];
     }[];
-    days: {
-        name: string;
-        description: string;
-    }[];
-    meals: {
-        name: string;
-        days: number[];
-        vendor_name: string;
-    }[];
+    days: { name: string; description: string }[];
+    meals: { name: string; days: number[]; vendor_name: string }[];
     tourDates: string[];
     cities: string[];
-    prices: {
-        adult_price: string;
-        child_price: string;
-        commission_agency_sum: string;
-    };
+    prices: { adult_price: string; child_price: string; commission_agency_sum: string };
     additional_price: string;
     additional_price_includes: string;
     additional_extra_price: string;
@@ -128,13 +117,106 @@ function sendSSE(sessionId: string, event: string, data: any) {
     if (!session) return;
     if (event === 'step') session.log.push(data);
     if (!session.res) return;
-    try {
-        session.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    } catch (e) {}
+    try { session.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch (e) {}
 }
 
 // ============================================
-// GEMINI AI ПАРСИНГ (через прокси)
+// SOCKS5 TUNNEL — отправка HTTPS через SOCKS5 прокси
+// ============================================
+
+function socks5TunnelRequest(options: {
+    host: string;
+    port: number;
+    path: string;
+    method: string;
+    headers: Record<string, string>;
+    body: string;
+}): Promise<{ status: number; data: string }> {
+    return new Promise((resolve, reject) => {
+        const socket = net.connect(1080, '127.0.0.1');
+
+        socket.on('connect', () => {
+            // SOCKS5 handshake — без авторизации
+            socket.write(Buffer.from([0x05, 0x01, 0x00]));
+        });
+
+        let buffer = Buffer.alloc(0);
+        let connected = false;
+        let responseData = '';
+
+        socket.on('data', (data: Buffer) => {
+            if (!connected) {
+                buffer = Buffer.concat([buffer, data]);
+
+                // Ответ на handshake
+                if (buffer.length >= 2 && buffer[0] === 0x05 && !connected) {
+                    // Отправляем CONNECT запрос
+                    const hostBuffer = Buffer.from(options.host, 'utf8');
+                    const connectPacket = Buffer.alloc(7 + hostBuffer.length);
+                    connectPacket[0] = 0x05;
+                    connectPacket[1] = 0x01;
+                    connectPacket[2] = 0x00;
+                    connectPacket[3] = 0x03;
+                    connectPacket[4] = hostBuffer.length;
+                    hostBuffer.copy(connectPacket, 5);
+                    connectPacket.writeUInt16BE(options.port, 5 + hostBuffer.length);
+
+                    socket.write(connectPacket);
+                    buffer = Buffer.alloc(0);
+                    connected = true;
+                }
+            } else {
+                // HTTP ответ через туннель
+                responseData += data.toString();
+            }
+        });
+
+        socket.on('error', (err: Error) => {
+            reject(err);
+        });
+
+        socket.on('close', () => {
+            if (responseData) {
+                const headerEnd = responseData.indexOf('\r\n\r\n');
+                if (headerEnd !== -1) {
+                    const headers = responseData.substring(0, headerEnd);
+                    const statusMatch = headers.match(/HTTP\/\d\.\d (\d+)/);
+                    const status = statusMatch ? parseInt(statusMatch[1]) : 200;
+                    const body = responseData.substring(headerEnd + 4);
+                    resolve({ status, data: body });
+                } else {
+                    resolve({ status: 200, data: responseData });
+                }
+            } else {
+                resolve({ status: 200, data: '' });
+            }
+        });
+
+        // Ждём подключения и отправляем HTTP запрос
+        const checkConnected = setInterval(() => {
+            if (connected) {
+                clearInterval(checkConnected);
+                const requestLines = [
+                    `${options.method} ${options.path} HTTP/1.1`,
+                    `Host: ${options.host}`,
+                    ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
+                    `Content-Length: ${Buffer.byteLength(options.body)}`,
+                    '',
+                    options.body,
+                ];
+                socket.write(requestLines.join('\r\n'));
+            }
+        }, 50);
+
+        setTimeout(() => {
+            clearInterval(checkConnected);
+            if (!connected) reject(new Error('SOCKS5 connection timeout'));
+        }, 10000);
+    });
+}
+
+// ============================================
+// GEMINI AI ПАРСИНГ (через SOCKS5)
 // ============================================
 
 async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour | null> {
@@ -147,157 +229,64 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
 
 СТРУКТУРА ОБЪЕКТОВ PAZL TOURS:
 
-1. ТУР (tour):
-{
-  "name": "полное название тура",
-  "duration": "длительность в днях (только число)",
-  "tour_type_id": 1,
-  "short_description": "краткое описание (1-2 предложения)",
-  "description": "полное описание тура",
-  "info": "дополнительная информация (что взять, важные заметки)",
-  "is_active": true
-}
+1. ТУР (tour): {"name":"","duration":"","tour_type_id":1,"short_description":"","description":"","info":"","is_active":true}
+2. ТРАНСПОРТ (transport): {"name":"","transportation_type":"","adult_price":"","child_price":"","duration":"","routes":{"start":{"city":"","time":"","info":""},"finish":{"city":"","time":"","info":""},"intermediates":[]},"dates":[]}
+3. ОТЕЛИ (hotels): [{"name":"","city":"","stars":3,"address":"","description":"","meals":[],"rooms":[]}]
+4. УСЛУГИ (services): [{"name":"","class":"group","description":"","dates":[{"from":"","to":"","vendor_price":"0","adult_price":"0","child_price":"0","commission_adult_sum":0,"commission_child_sum":0}]}]
+5. ДНИ (days): [{"name":"","description":""}]
+6. ПИТАНИЕ (meals): [{"name":"","days":[],"vendor_name":""}]
+7. ОБЩИЕ: {"tourDates":[],"cities":[],"prices":{"adult_price":"","child_price":"","commission_agency_sum":"0"},"additional_price":"","additional_price_includes":"","additional_extra_price":"","included":[],"notIncluded":[]}
 
-2. ТРАНСПОРТ (transport):
-{
-  "name": "название маршрута",
-  "transportation_type": "тип транспорта (автобус, микроавтобус, поезд, самолёт)",
-  "adult_price": "цена взрослого (только число)",
-  "child_price": "цена детского (только число)",
-  "duration": "длительность поездки в часах",
-  "routes": {
-    "start": { "city": "город отправления", "time": "время отправления", "info": "место посадки" },
-    "finish": { "city": "город возвращения", "time": "время возвращения", "info": "место высадки" },
-    "intermediates": [
-      { "city": "промежуточный город", "time": "время", "info": "информация", "arrival_day": 1, "departure_day": 1 }
-    ]
-  },
-  "dates": [{ "start_date": "YYYY-MM-DD" }]
-}
+ПРАВИЛА: только что указано в тексте, нет — null или [], цены числами, даты YYYY-MM-DD, не придумывай.
+Верни JSON: {tour, transport, hotels, services, days, meals, tourDates, cities, prices, additional_price, additional_price_includes, additional_extra_price, included, notIncluded}
 
-3. ОТЕЛИ (hotels) — массив:
-{
-  "name": "название отеля",
-  "city": "город",
-  "stars": 3,
-  "address": "адрес",
-  "description": "описание",
-  "meals": [{ "name": "Завтрак", "sum": "0" }],
-  "rooms": [{
-    "name": "название номера",
-    "type": "Стандарт / Полулюкс / Люкс",
-    "place": "1 местный / 2-х местный / 1/2 двухместного",
-    "accommodation": "Эконом / Средние / Комфорт",
-    "description": "описание номера",
-    "adult_count": "количество взрослых",
-    "child_count": "количество детей",
-    "adult_price": "цена взрослого",
-    "child_price": "цена ребёнка"
-  }]
-}
-
-4. УСЛУГИ (services) — массив:
-{
-  "name": "название услуги",
-  "class": "group или individual",
-  "description": "описание",
-  "dates": [{
-    "from": "YYYY-MM-DD",
-    "to": "YYYY-MM-DD",
-    "vendor_price": "цена поставщика",
-    "adult_price": "цена взрослого",
-    "child_price": "цена детского",
-    "commission_adult_sum": 0,
-    "commission_child_sum": 0
-  }]
-}
-
-5. ДНИ ПРОГРАММЫ (days) — массив:
-{
-  "name": "День 1: Заголовок",
-  "description": "описание программы дня"
-}
-
-6. ПИТАНИЕ (meals) — массив:
-{
-  "name": "Завтрак / Обед / Ужин",
-  "days": [1, 2, 3],
-  "vendor_name": ""
-}
-
-7. ОБЩИЕ ДАННЫЕ:
-{
-  "tourDates": ["дата1", "дата2"],
-  "cities": ["город1", "город2"],
-  "prices": {
-    "adult_price": "базовая цена взрослого",
-    "child_price": "базовая цена ребёнка",
-    "commission_agency_sum": "0"
-  },
-  "additional_price": "",
-  "additional_price_includes": "",
-  "additional_extra_price": "",
-  "included": ["что включено 1"],
-  "notIncluded": ["что не включено 1"]
-}
-
-ПРАВИЛА:
-- Извлекай ТОЛЬКО то, что явно указано в тексте
-- Если чего-то нет — оставь пустой массив [] или null
-- Цены указывай ТОЛЬКО числами, без символов валют
-- Даты приводи к формату YYYY-MM-DD
-- Не придумывай данные
-
-Верни ОДИН JSON объект содержащий поля: tour, transport, hotels, services, days, meals, tourDates, cities, prices, additional_price, additional_price_includes, additional_extra_price, included, notIncluded
-
-Текст страницы:
-${rawText.substring(0, 20000)}`;
+Текст: ${rawText.substring(0, 20000)}`;
 
     try {
-        console.log('🤖 Отправляем запрос к Gemini через прокси Амстердам...');
+        console.log('🤖 Отправляем запрос к Gemini через SOCKS5...');
 
-        // Прокси через SSH туннель
-        const proxyAgent = new HttpsProxyAgent('socks5://127.0.0.1:1080');
+        const body = JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 8000 }
+        });
 
-        const response = await fetch(AI_API_URL, {
+        const result = await socks5TunnelRequest({
+            host: 'generativelanguage.googleapis.com',
+            port: 443,
+            path: `/v1beta/models/gemini-3.1-flash-lite:generateContent`,
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'x-goog-api-key': AI_API_KEY,
             },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { temperature: 0.1, maxOutputTokens: 8000 }
-            }),
-            agent: proxyAgent,
+            body,
         });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error('❌ Gemini API error:', response.status, errorText.substring(0, 500));
+        if (result.status !== 200) {
+            console.error('❌ Gemini API error:', result.status, result.data.substring(0, 500));
             return null;
         }
 
-        const data: any = await response.json();
+        const data = JSON.parse(result.data);
         const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
 
         if (!content) {
-            console.log('❌ Gemini вернул пустой ответ');
+            console.log('❌ Gemini пустой ответ');
             return null;
         }
 
-        console.log('📦 Gemini ответ (первые 500):', content.substring(0, 500));
+        console.log('📦 Gemini:', content.substring(0, 300));
 
         let jsonStr = content.trim();
-        const jsonMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-        if (jsonMatch) jsonStr = jsonMatch[1].trim();
+        const m = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (m) jsonStr = m[1].trim();
 
         const parsed: AIParsedTour = JSON.parse(jsonStr);
-        console.log('✅ Gemini распарсил тур:', parsed.tour?.name);
+        console.log('✅ Тур:', parsed.tour?.name);
         return parsed;
 
     } catch (error: any) {
-        console.error('❌ Ошибка Gemini парсинга:', error.message);
+        console.error('❌ Gemini error:', error.message);
         return null;
     }
 }
@@ -307,7 +296,7 @@ ${rawText.substring(0, 20000)}`;
 // ============================================
 
 async function parseExternalPage(url: string): Promise<ParsedTourData> {
-    console.log(`🔍 Открываем страницу: ${url}`);
+    console.log(`🔍 Открываем: ${url}`);
 
     const browser = await chromium.launch({
         headless: true,
@@ -323,12 +312,8 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
 
         await page.evaluate(async () => {
             await new Promise<void>((resolve) => {
-                let totalHeight = 0;
-                const timer = setInterval(() => {
-                    window.scrollBy(0, 300);
-                    totalHeight += 300;
-                    if (totalHeight >= document.body.scrollHeight) { clearInterval(timer); resolve(); }
-                }, 100);
+                let h = 0;
+                const t = setInterval(() => { window.scrollBy(0, 300); h += 300; if (h >= document.body.scrollHeight) { clearInterval(t); resolve(); } }, 100);
             });
         });
         await page.waitForTimeout(1000);
@@ -336,13 +321,12 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
         const pageTitle = await page.title();
 
         const rawText = await page.evaluate(() => {
-            const elementsToRemove = document.querySelectorAll('script, style, noscript, iframe, nav, footer, header');
-            elementsToRemove.forEach(s => { try { s.remove(); } catch (e) {} });
-            return document.body?.innerText || document.body?.textContent || '';
+            document.querySelectorAll('script, style, noscript, iframe, nav, footer, header').forEach(s => { try { s.remove(); } catch (e) {} });
+            return document.body?.innerText || '';
         });
 
         const cleanedText = rawText.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{3,}/g, '  ').trim();
-        console.log(`📄 Текст страницы: ${cleanedText.length} символов`);
+        console.log(`📄 Текст: ${cleanedText.length} символов`);
 
         const aiResult = await parseWithAI(cleanedText, url);
 
@@ -350,37 +334,26 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
         let id = 0;
 
         if (aiResult) {
-            const tour = aiResult.tour;
-            if (tour?.name) blocks.push({ id: `block_${id++}`, type: 'tour_title', title: '🏷️ Название тура', content: tour.name, rawHtml: '' });
-            if (tour?.duration) blocks.push({ id: `block_${id++}`, type: 'duration', title: '⏱️ Длительность', content: `${tour.duration} дней`, rawHtml: '' });
-            if (tour?.short_description) blocks.push({ id: `block_${id++}`, type: 'description', title: '📝 Краткое описание', content: tour.short_description, rawHtml: '' });
-            if (tour?.description) blocks.push({ id: `block_${id++}`, type: 'description', title: '📄 Полное описание', content: tour.description, rawHtml: '' });
-            if (tour?.info) blocks.push({ id: `block_${id++}`, type: 'info', title: 'ℹ️ Доп. информация', content: tour.info, rawHtml: '' });
-
+            const t = aiResult.tour;
+            if (t?.name) blocks.push({ id: `block_${id++}`, type: 'tour_title', title: '🏷️ Название тура', content: t.name, rawHtml: '' });
+            if (t?.duration) blocks.push({ id: `block_${id++}`, type: 'duration', title: '⏱️ Длительность', content: `${t.duration} дней`, rawHtml: '' });
+            if (t?.short_description) blocks.push({ id: `block_${id++}`, type: 'description', title: '📝 Краткое описание', content: t.short_description, rawHtml: '' });
+            if (t?.description) blocks.push({ id: `block_${id++}`, type: 'description', title: '📄 Полное описание', content: t.description, rawHtml: '' });
+            if (t?.info) blocks.push({ id: `block_${id++}`, type: 'info', title: 'ℹ️ Доп. информация', content: t.info, rawHtml: '' });
             if (aiResult.transport) blocks.push({ id: `block_${id++}`, type: 'transport', title: '🚌 Транспорт', content: JSON.stringify(aiResult.transport, null, 2), rawHtml: '' });
-
             if (aiResult.hotels?.length) blocks.push({ id: `block_${id++}`, type: 'hotel', title: `🏨 Отели (${aiResult.hotels.length})`, content: JSON.stringify(aiResult.hotels, null, 2), rawHtml: '' });
-
             if (aiResult.services?.length) blocks.push({ id: `block_${id++}`, type: 'service', title: `🛠️ Услуги (${aiResult.services.length})`, content: JSON.stringify(aiResult.services, null, 2), rawHtml: '' });
-
-            if (aiResult.days?.length) blocks.push({ id: `block_${id++}`, type: 'program', title: `📅 Программа (${aiResult.days.length} дней)`, content: JSON.stringify(aiResult.days, null, 2), rawHtml: '' });
-
+            if (aiResult.days?.length) blocks.push({ id: `block_${id++}`, type: 'program', title: `📅 Программа (${aiResult.days.length} дн)`, content: JSON.stringify(aiResult.days, null, 2), rawHtml: '' });
             if (aiResult.prices) blocks.push({ id: `block_${id++}`, type: 'price', title: '💰 Цены', content: JSON.stringify(aiResult.prices, null, 2), rawHtml: '' });
-
             if (aiResult.cities?.length) blocks.push({ id: `block_${id++}`, type: 'departure_cities', title: '📍 Города', content: aiResult.cities.join(', '), rawHtml: '' });
-
             if (aiResult.tourDates?.length) blocks.push({ id: `block_${id++}`, type: 'dates', title: '📆 Даты', content: aiResult.tourDates.join(', '), rawHtml: '' });
-
             if (aiResult.included?.length) blocks.push({ id: `block_${id++}`, type: 'included', title: '✅ Включено', content: aiResult.included.join('\n'), rawHtml: '' });
-
             if (aiResult.notIncluded?.length) blocks.push({ id: `block_${id++}`, type: 'extra', title: '❌ Дополнительно', content: aiResult.notIncluded.join('\n'), rawHtml: '' });
-
             if (aiResult.meals?.length) blocks.push({ id: `block_${id++}`, type: 'meals', title: '🍽️ Питание', content: JSON.stringify(aiResult.meals, null, 2), rawHtml: '' });
         }
 
         blocks.push({ id: `block_${id++}`, type: 'raw_text', title: '📋 Полный текст страницы', content: cleanedText.substring(0, 8000), rawHtml: '' });
-
-        console.log(`✅ Создано блоков: ${blocks.length} (AI: ${aiResult ? 'да' : 'нет'})`);
+        console.log(`✅ Блоков: ${blocks.length} (AI: ${aiResult ? 'да' : 'нет'})`);
 
         return { url, title: pageTitle || 'Тур', blocks, rawText: cleanedText, aiResult: aiResult || undefined };
 
@@ -396,14 +369,11 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
 router.post('/parse', async (req: Request, res: Response) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ success: false, error: 'URL обязателен' });
-
     try {
-        console.log(`\n🔍 Парсинг страницы: ${url}`);
         const parsedData = await parseExternalPage(url);
         res.json({ success: true, data: parsedData });
     } catch (error: any) {
-        console.error('❌ Ошибка парсинга:', error);
-        res.status(500).json({ success: false, error: error.message || 'Ошибка парсинга' });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -412,15 +382,11 @@ router.post('/create', async (req: Request, res: Response) => {
     if (!parsedData || !matchedEntities || !pazlEmail || !pazlPassword) {
         return res.status(400).json({ success: false, error: 'Все поля обязательны' });
     }
-
     const sessionId = `ext_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     sessions.set(sessionId, { res: null, status: 'starting', log: [] });
-    console.log(`🆕 Сессия внешней миграции: ${sessionId}`);
     res.json({ success: true, data: { sessionId } });
-
-    runExternalMigration(sessionId, parsedData, matchedEntities, pazlEmail, pazlPassword).catch(err => {
-        console.error('Migration error:', err);
-        sendSSE(sessionId, 'error', { message: err.message || 'Неизвестная ошибка' });
+    runMigration(sessionId, parsedData, matchedEntities, pazlEmail, pazlPassword).catch(err => {
+        sendSSE(sessionId, 'error', { message: err.message });
     });
 });
 
@@ -431,78 +397,41 @@ router.get('/stream/:sessionId', (req: Request, res: Response) => {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', 'https://tour-creator.tsukawa.ru');
     res.write(`event: connected\ndata: ${JSON.stringify({ sessionId })}\n\n`);
-
     const session = sessions.get(sessionId);
-    if (session) {
-        session.res = res;
-        if (session.log.length > 0) {
-            for (const logEntry of session.log) res.write(`event: step\ndata: ${JSON.stringify(logEntry)}\n\n`);
-        }
-    } else {
-        sessions.set(sessionId, { res, status: 'connected', log: [] });
-    }
-
+    if (session) { session.res = res; for (const e of session.log) res.write(`event: step\ndata: ${JSON.stringify(e)}\n\n`); }
+    else sessions.set(sessionId, { res, status: 'connected', log: [] });
     const ping = setInterval(() => { try { res.write(`: ping ${Date.now()}\n\n`); } catch (e) { clearInterval(ping); } }, 15000);
-    req.on('close', () => { clearInterval(ping); });
+    req.on('close', () => clearInterval(ping));
 });
 
 // ============================================
-// ВЫПОЛНЕНИЕ МИГРАЦИИ
+// МИГРАЦИЯ
 // ============================================
 
-async function runExternalMigration(
-    sessionId: string, parsedData: ParsedTourData, matchedEntities: any[],
-    pazlEmail: string, pazlPassword: string
-) {
+async function runMigration(sessionId: string, parsedData: ParsedTourData, matchedEntities: any[], pazlEmail: string, pazlPassword: string) {
     let browser: any = null;
     try {
-        sendSSE(sessionId, 'step', { step: 0, status: 'active', message: 'Запуск браузера...' });
-        browser = await chromium.launch({
-            headless: true, executablePath: '/snap/bin/chromium',
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-        });
-        const context = await browser.newContext();
-
-        sendSSE(sessionId, 'step', { step: 0, status: 'active', message: 'Вход в Pazl Tours...' });
-        const pazlPage = await context.newPage();
-        await pazlPage.goto('https://manager.pazltours.online/auth');
-        await pazlPage.waitForTimeout(3000);
-
-        const emailInput = await pazlPage.$('input[type="text"]') || await pazlPage.$('input[name="login"]');
-        const passwordInput = await pazlPage.$('input[type="password"]');
-        if (!emailInput || !passwordInput) { sendSSE(sessionId, 'step', { step: 0, status: 'error', message: 'Поля не найдены' }); await browser.close(); return; }
-
-        await emailInput.fill(pazlEmail);
-        await passwordInput.fill(pazlPassword);
-        const submitButton = await pazlPage.$('button[type="submit"]');
-        if (submitButton) await submitButton.click(); else await passwordInput.press('Enter');
-        await pazlPage.waitForTimeout(5000);
-
-        if (!pazlPage.url().includes('/welcome') && !pazlPage.url().includes('/dashboard')) {
-            sendSSE(sessionId, 'step', { step: 0, status: 'error', message: 'Неверный email или пароль' });
-            await browser.close(); return;
-        }
-
+        sendSSE(sessionId, 'step', { step: 0, status: 'active', message: 'Запуск...' });
+        browser = await chromium.launch({ headless: true, executablePath: '/snap/bin/chromium', args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+        const ctx = await browser.newContext();
+        const page = await ctx.newPage();
+        await page.goto('https://manager.pazltours.online/auth');
+        await page.waitForTimeout(3000);
+        const emailEl = await page.$('input[type="text"]') || await page.$('input[name="login"]');
+        const passEl = await page.$('input[type="password"]');
+        if (!emailEl || !passEl) { sendSSE(sessionId, 'step', { step: 0, status: 'error', message: 'Поля не найдены' }); await browser.close(); return; }
+        await emailEl.fill(pazlEmail);
+        await passEl.fill(pazlPassword);
+        const btn = await page.$('button[type="submit"]');
+        if (btn) await btn.click(); else await passEl.press('Enter');
+        await page.waitForTimeout(5000);
+        if (!page.url().includes('/welcome') && !page.url().includes('/dashboard')) { sendSSE(sessionId, 'step', { step: 0, status: 'error', message: 'Неверный логин/пароль' }); await browser.close(); return; }
         sendSSE(sessionId, 'step', { step: 0, status: 'completed', message: 'Вход выполнен' });
-        sendSSE(sessionId, 'step', { step: 1, status: 'completed', message: 'Данные подготовлены' });
-
-        const tourName = parsedData.aiResult?.tour?.name || parsedData.title || 'Тур';
-        const resultData = {
-            success: true,
-            data: {
-                tourData: { name: tourName, sourceUrl: parsedData.url, blocksCount: parsedData.blocks.length },
-                matchedEntities,
-                stats: { total: matchedEntities.length, hotels: matchedEntities.filter((e: any) => e.entityType === 'hotel').length, transports: matchedEntities.filter((e: any) => e.entityType === 'transport').length, services: matchedEntities.filter((e: any) => e.entityType === 'service').length, days: matchedEntities.filter((e: any) => e.entityType === 'day').length },
-                createdEntities: [],
-                message: `Данные подготовлены. Тур: "${tourName}". Сущностей: ${matchedEntities.length}`
-            }
-        };
-        sendSSE(sessionId, 'result', resultData);
-    } catch (error: any) {
-        sendSSE(sessionId, 'error', { message: error.message });
-    } finally {
-        if (browser) { try { await browser.close(); } catch (e) {} }
-    }
+        sendSSE(sessionId, 'step', { step: 1, status: 'completed', message: 'Готово' });
+        const name = parsedData.aiResult?.tour?.name || parsedData.title || 'Тур';
+        sendSSE(sessionId, 'result', { success: true, data: { tourData: { name, sourceUrl: parsedData.url }, matchedEntities, stats: { total: matchedEntities.length }, createdEntities: [], message: `Тур: "${name}". Сущностей: ${matchedEntities.length}` } });
+    } catch (e: any) { sendSSE(sessionId, 'error', { message: e.message }); }
+    finally { if (browser) try { await browser.close(); } catch (e) {} }
 }
 
 export default router;
