@@ -126,29 +126,45 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
 
             // Удаляем мусорные элементы перед парсингом
             const removeSelectors = [
-                'nav', 'footer', 'header', '.nav', '.menu', '.footer', '.header',
-                '.sidebar', '.breadcrumbs', '.pagination', '.social', '.copyright',
-                '.moduletable', '.module', '[class*="menu"]', '[class*="nav"]',
-                'script', 'style', 'noscript', 'iframe', '.mod-wrapper',
-                '.sp-megamenu-parent', '.logo', '.search', '#sp-header',
-                '#sp-bottom', '#sp-footer', '.sp-module',
+                'nav', 'footer', 'header', 'script', 'style', 'noscript', 'iframe',
+                '.nav', '.menu', '.footer', '.header', '.sidebar', '.breadcrumbs',
+                '.pagination', '.social', '.copyright', '.moduletable', '.module',
+                '.mod-wrapper', '.sp-megamenu-parent', '.logo', '.search',
+                '#sp-header', '#sp-bottom', '#sp-footer', '.sp-module',
+                '[class*="menu"]', '[class*="nav"]',
             ];
 
+            // Собираем все элементы для удаления в массив
+            const elementsToRemove: Element[] = [];
             for (const selector of removeSelectors) {
                 try {
-                    document.querySelectorAll(selector).forEach(el => {
-                        el.innerHTML = '';
-                        el.remove();
-                    });
-                } catch (e) {}
+                    const els = document.querySelectorAll(selector);
+                    els.forEach(el => elementsToRemove.push(el));
+                } catch (e) {
+                    // Игнорируем ошибки невалидных селекторов
+                }
             }
+
+            // Удаляем элементы
+            for (const el of elementsToRemove) {
+                try {
+                    if (el && el.parentNode) {
+                        el.parentNode.removeChild(el);
+                    }
+                } catch (e) {
+                    // Игнорируем
+                }
+            }
+
+            // Ждём немного после удаления
+            // (не можем использовать setTimeout в evaluate)
 
             // ===== ИЗВЛЕКАЕМ КОНКРЕТНЫЕ ДАННЫЕ =====
 
             // 1. Название тура
             const h1 = document.querySelector('h1, .product-title, .tour-title, .item-title, h2');
-            if (h1) {
-                const titleText = h1.textContent?.trim() || '';
+            if (h1 && h1.textContent) {
+                const titleText = h1.textContent.trim();
                 if (titleText && titleText.length > 5) {
                     result.push({
                         id: `block_${id++}`,
@@ -160,75 +176,110 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
                 }
             }
 
-            // 2. Основное описание
+            // 2. Основное описание — ищем контентную область
             const descSelectors = [
                 '.product-description', '.tour-description', '.item-description',
                 '.entry-content', '.post-content', '[itemprop="description"]',
                 '.tab-content .active', '.sp-tab-content .active',
+                '.vm-product-details-container', '.productdetails-view',
             ];
 
+            let contentEl: Element | null = null;
             for (const selector of descSelectors) {
                 const el = document.querySelector(selector);
                 if (el) {
-                    const text = el.textContent?.trim() || '';
-                    if (text.length > 50) {
-                        const sections = el.querySelectorAll('h2, h3, h4, strong, b, p');
-                        let currentSection = { title: 'Описание', content: '' };
-                        let mainDescription = '';
-
-                        for (const section of sections) {
-                            const tag = section.tagName.toLowerCase();
-                            const sectionText = section.textContent?.trim() || '';
-
-                            if (['h2', 'h3', 'h4'].includes(tag) || (['strong', 'b'].includes(tag) && sectionText.length < 100)) {
-                                if (currentSection.content.trim().length > 20) {
-                                    const sectionType = determineSectionType(currentSection.title, currentSection.content);
-                                    result.push({
-                                        id: `block_${id++}`,
-                                        type: sectionType,
-                                        title: currentSection.title,
-                                        content: currentSection.content.trim(),
-                                        rawHtml: ''
-                                    });
-                                }
-                                currentSection = { title: sectionText, content: '' };
-                            } else {
-                                currentSection.content += sectionText + '\n';
-                                mainDescription += sectionText + '\n';
-                            }
-                        }
-
-                        if (currentSection.content.trim().length > 20) {
-                            const sectionType = determineSectionType(currentSection.title, currentSection.content);
-                            result.push({
-                                id: `block_${id++}`,
-                                type: sectionType,
-                                title: currentSection.title,
-                                content: currentSection.content.trim(),
-                                rawHtml: ''
-                            });
-                        }
-
-                        if (mainDescription.trim().length > 50) {
-                            result.push({
-                                id: `block_${id++}`,
-                                type: 'description',
-                                title: 'Полное описание',
-                                content: mainDescription.trim(),
-                                rawHtml: ''
-                            });
-                        }
-                    }
+                    contentEl = el;
                     break;
                 }
             }
 
+            // Если не нашли — берём body за вычетом удалённых элементов
+            if (!contentEl) {
+                contentEl = document.body;
+            }
+
+            if (contentEl) {
+                const text = (contentEl.textContent || '').trim();
+                if (text.length > 50) {
+                    // Ищем все заголовки и параграфы внутри
+                    const allElements = contentEl.querySelectorAll('h1, h2, h3, h4, h5, h6, p, strong, b, .price, .product-price, .tour-price, [class*="price"], [class*="cost"], .vm-price, .PricesalesPrice');
+                    let currentSection: { title: string; content: string } | null = null;
+                    let mainDescription = '';
+
+                    for (const el of allElements) {
+                        // Пропускаем если элемент уже удалён
+                        if (!el || !el.textContent) continue;
+
+                        const tag = el.tagName.toLowerCase();
+                        const elText = el.textContent.trim();
+                        if (!elText || elText.length < 3) continue;
+
+                        // Проверяем не скрыт ли элемент
+                        try {
+                            const style = window.getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        } catch (e) {
+                            // Игнорируем
+                        }
+
+                        // Это заголовок секции
+                        if (['h2', 'h3', 'h4', 'h5', 'h6'].includes(tag) ||
+                            (['strong', 'b'].includes(tag) && elText.length < 150)) {
+
+                            // Сохраняем предыдущую секцию
+                            if (currentSection && currentSection.content.trim().length > 20) {
+                                const sectionType = determineSectionType(currentSection.title, currentSection.content);
+                                result.push({
+                                    id: `block_${id++}`,
+                                    type: sectionType,
+                                    title: currentSection.title,
+                                    content: currentSection.content.trim(),
+                                    rawHtml: ''
+                                });
+                            }
+                            currentSection = { title: elText, content: '' };
+                        } else {
+                            // Контент
+                            if (!currentSection) {
+                                currentSection = { title: 'Описание', content: '' };
+                            }
+                            currentSection.content += elText + '\n';
+                            mainDescription += elText + '\n';
+                        }
+                    }
+
+                    // Сохраняем последнюю секцию
+                    if (currentSection && currentSection.content.trim().length > 20) {
+                        const sectionType = determineSectionType(currentSection.title, currentSection.content);
+                        result.push({
+                            id: `block_${id++}`,
+                            type: sectionType,
+                            title: currentSection.title,
+                            content: currentSection.content.trim(),
+                            rawHtml: ''
+                        });
+                    }
+
+                    // Общее описание
+                    if (mainDescription.trim().length > 50) {
+                        result.push({
+                            id: `block_${id++}`,
+                            type: 'description',
+                            title: 'Полное описание',
+                            content: mainDescription.trim(),
+                            rawHtml: ''
+                        });
+                    }
+                }
+            }
+
             // 3. Цены
-            const priceElements = document.querySelectorAll('.price, .product-price, .tour-price, [class*="price"], [class*="cost"]');
+            const priceElements = document.querySelectorAll('.price, .product-price, .tour-price, [class*="price"], [class*="cost"], .vm-price, .PricesalesPrice, .variant-price');
             const prices: string[] = [];
             for (const el of priceElements) {
-                const text = el.textContent?.trim() || '';
-                if (text && /[\d\s]+[₽р]/.test(text) && !prices.includes(text)) {
+                if (!el || !el.textContent) continue;
+                const text = el.textContent.trim();
+                if (text && /[\d\s]+[₽р]/.test(text) && !prices.includes(text) && text.length < 200) {
                     prices.push(text);
                 }
             }
@@ -243,84 +294,47 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
             }
 
             // 4. Даты
-            const datePattern = /\d{1,2}\s*(июн|июл|авг|сен|окт|ноя|дек|янв|фев|мар|апр|май|июня|июля|августа|сентября|октября|ноября|декабря|января|февраля|марта|апреля|мая)\s*,?\s*\d{4}?/gi;
-            const bodyText = document.body.textContent || '';
+            const bodyText = (document.body.textContent || '').replace(/\s+/g, ' ');
+            const datePattern = /\d{1,2}\s*(июн[ья]?|июл[ья]?|авг[уста]*|сен[тября]*|окт[ябр]*|ноя[бр]*|дек[абр]*|янв[ар]*|фев[рал]*|мар[та]*|апр[ел]*|ма[йя])\s*,?\s*\d{4}?/gi;
             const foundDates = bodyText.match(datePattern);
             if (foundDates && foundDates.length > 0) {
-                const uniqueDates = [...new Set(foundDates)].slice(0, 50);
-                result.push({
-                    id: `block_${id++}`,
-                    type: 'dates',
-                    title: 'Даты тура',
-                    content: uniqueDates.join(', '),
-                    rawHtml: ''
-                });
-            }
-
-            // 5. Города отправления
-            const citiesPattern = /(?:из|от|в)\s+(Анап|Новороссийск|Геленджик|Сочи|Краснодар|Москв|Санкт-Петербург|Казан|Екатеринбург|Ростов|Волгоград|Самар|Нижн|Воронеж|Крым|Симферопол|Ялт|Севастопол)/gi;
-            const foundCities = bodyText.match(citiesPattern);
-            if (foundCities && foundCities.length > 0) {
-                const uniqueCities = [...new Set(foundCities)].slice(0, 20);
-                result.push({
-                    id: `block_${id++}`,
-                    type: 'departure_cities',
-                    title: 'Города отправления',
-                    content: uniqueCities.join(', '),
-                    rawHtml: ''
-                });
-            }
-
-            // 6. Транспорт
-            const transportPatterns = [
-                /(?:проезд|транспорт|автобус|микроавтобус|поезд|самолёт|теплоход)[^.]*\./gi,
-                /(?:Mercedes|Sprinter|Ford|Volvo|Scania|MAN|Neoplan|Setra)[^.]*\./gi,
-            ];
-            for (const pattern of transportPatterns) {
-                const found = bodyText.match(pattern);
-                if (found && found.length > 0) {
+                const uniqueDates = [...new Set(foundDates.map(d => d.replace(/\s+/g, ' ').trim()))].slice(0, 50);
+                if (uniqueDates.length > 0) {
                     result.push({
                         id: `block_${id++}`,
-                        type: 'transport',
-                        title: 'Транспорт',
-                        content: found.join('\n'),
+                        type: 'dates',
+                        title: 'Даты тура',
+                        content: uniqueDates.join(', '),
                         rawHtml: ''
                     });
-                    break;
                 }
             }
 
-            // 7. Что включено / дополнительно оплачивается
-            const includedSection = document.querySelector('[class*="included"], [class*="include"], [class*="vhodit"], [class*="vkluchen"]');
-            if (includedSection) {
-                result.push({
-                    id: `block_${id++}`,
-                    type: 'included',
-                    title: 'Включено в стоимость',
-                    content: includedSection.textContent?.trim() || '',
-                    rawHtml: ''
-                });
+            // 5. Города отправления
+            const citiesPattern = /(?:из|от|в)\s+(Анап[ы]?|Новороссийск[а]?|Геленджик[а]?|Сочи|Краснодар[а]?|Москв[ы]?|Санкт-Петербург[а]?|Казан[и]?|Екатеринбург[а]?|Ростов[а]?|Волгоград[а]?|Самар[ы]?|Нижн[его]*\s*Новгород[а]?|Воронеж[а]?|Крым[а]?|Симферопол[я]?|Ялт[ы]?|Севастопол[я]?)/gi;
+            const foundCities = bodyText.match(citiesPattern);
+            if (foundCities && foundCities.length > 0) {
+                const uniqueCities = [...new Set(foundCities.map(c => c.trim()))].slice(0, 20);
+                if (uniqueCities.length > 0) {
+                    result.push({
+                        id: `block_${id++}`,
+                        type: 'departure_cities',
+                        title: 'Города отправления',
+                        content: uniqueCities.join(', '),
+                        rawHtml: ''
+                    });
+                }
             }
 
-            const extraSection = document.querySelector('[class*="extra"], [class*="dop"], [class*="additional"], [class*="oplachivaetsya"]');
-            if (extraSection) {
-                result.push({
-                    id: `block_${id++}`,
-                    type: 'extra',
-                    title: 'Дополнительно оплачивается',
-                    content: extraSection.textContent?.trim() || '',
-                    rawHtml: ''
-                });
-            }
-
-            // 8. Изображения
-            const images = document.querySelectorAll('img[src]:not([src*="icon"]):not([src*="logo"]):not([src*="data:"])');
+            // 6. Изображения
+            const images = document.querySelectorAll('img[src]:not([src*="icon"]):not([src*="logo"]):not([src*="data:"]):not([src*="blank"]):not([src*="placeholder"])');
             const imageUrls: string[] = [];
             for (const img of images) {
+                if (!img) continue;
                 const src = (img as HTMLImageElement).src;
                 const w = (img as HTMLImageElement).naturalWidth;
                 const h = (img as HTMLImageElement).naturalHeight;
-                if (src && w > 200 && h > 100 && !src.includes('blank') && !src.includes('placeholder')) {
+                if (src && w > 200 && h > 100 && !src.includes('icon') && !src.includes('logo')) {
                     imageUrls.push(src);
                 }
             }
@@ -334,12 +348,19 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
                 });
             }
 
-            // 9. Если ничего не нашли — fallback
-            if (result.length < 3) {
-                const allTextBlocks = document.querySelectorAll('p, div:not([class]):not([id]), span.block, .text-block');
-                for (const el of allTextBlocks) {
-                    const text = el.textContent?.trim() || '';
+            // 7. Если ничего не нашли — fallback
+            if (result.length < 2) {
+                const allElements = document.body.querySelectorAll('p, div, span, li');
+                for (const el of allElements) {
+                    if (!el || !el.textContent) continue;
+                    const text = el.textContent.trim();
                     if (text.length > 30 && text.length < 3000) {
+                        // Проверяем что элемент видимый
+                        try {
+                            const style = window.getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden') continue;
+                        } catch (e) { continue; }
+
                         result.push({
                             id: `block_${id++}`,
                             type: 'text',
@@ -359,7 +380,7 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
         const seenContent = new Set<string>();
         for (const block of blocks) {
             const normalized = block.content.substring(0, 100).replace(/\s+/g, ' ').trim();
-            if (!seenContent.has(normalized)) {
+            if (!seenContent.has(normalized) && normalized.length > 10) {
                 seenContent.add(normalized);
                 uniqueBlocks.push(block);
             }
@@ -383,7 +404,6 @@ async function parseExternalPage(url: string): Promise<ParsedTourData> {
         await browser.close();
     }
 }
-
 // ============================================
 // РОУТЫ
 // ============================================
