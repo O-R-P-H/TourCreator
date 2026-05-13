@@ -1,6 +1,7 @@
 // src/routes/external-migrate.routes.ts
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const router = Router();
 
@@ -10,6 +11,7 @@ const router = Router();
 
 const AI_API_KEY = process.env.AI_API_KEY || 'AIzaSyBNB2r5vN1hbvFQetpP_TOs3ru9pb8WjOk';
 const AI_API_URL = process.env.AI_API_URL || 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent';
+
 // ============================================
 // ТИПЫ
 // ============================================
@@ -132,7 +134,7 @@ function sendSSE(sessionId: string, event: string, data: any) {
 }
 
 // ============================================
-// GEMINI AI ПАРСИНГ
+// GEMINI AI ПАРСИНГ (через прокси)
 // ============================================
 
 async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour | null> {
@@ -252,7 +254,10 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
 ${rawText.substring(0, 20000)}`;
 
     try {
-        console.log('🤖 Отправляем запрос к Gemini...');
+        console.log('🤖 Отправляем запрос к Gemini через прокси Амстердам...');
+
+        // Прокси через SSH туннель
+        const proxyAgent = new HttpsProxyAgent('socks5://127.0.0.1:1080');
 
         const response = await fetch(AI_API_URL, {
             method: 'POST',
@@ -261,18 +266,10 @@ ${rawText.substring(0, 20000)}`;
                 'x-goog-api-key': AI_API_KEY,
             },
             body: JSON.stringify({
-                contents: [
-                    {
-                        parts: [
-                            { text: prompt }
-                        ]
-                    }
-                ],
-                generationConfig: {
-                    temperature: 0.1,
-                    maxOutputTokens: 8000,
-                }
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.1, maxOutputTokens: 8000 }
             }),
+            agent: proxyAgent,
         });
 
         if (!response.ok) {
@@ -296,7 +293,6 @@ ${rawText.substring(0, 20000)}`;
         if (jsonMatch) jsonStr = jsonMatch[1].trim();
 
         const parsed: AIParsedTour = JSON.parse(jsonStr);
-
         console.log('✅ Gemini распарсил тур:', parsed.tour?.name);
         return parsed;
 
