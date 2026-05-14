@@ -133,43 +133,57 @@ function socks5TunnelRequest(options: {
     body: string;
 }): Promise<{ status: number; data: string }> {
     return new Promise((resolve, reject) => {
-        const socket = net.connect(1080, '127.0.0.1');
+        // Параметры Amnezia SOCKS5
+        const socksHost = '5.129.231.194';
+        const socksPort = 40518;
+        const socksUser = 'proxy_user';
+        const socksPass = 'ML66rtB2Gf';
+
+        const socket = net.connect(socksPort, socksHost);
         let responseData = '';
-        let state: 'handshake' | 'connect' | 'http' = 'handshake';
+        let state: 'handshake' | 'auth' | 'connect' | 'http' = 'handshake';
         let contentLength = -1;
         let headerEnd = -1;
 
         socket.on('connect', () => {
-            socket.write(Buffer.from([0x05, 0x01, 0x00]));
+            // SOCKS5 handshake — с авторизацией
+            socket.write(Buffer.from([0x05, 0x02, 0x00, 0x02])); // Версия 5, 2 метода: no auth, user/pass
         });
 
         socket.on('data', (chunk: Buffer) => {
             if (state === 'handshake') {
-                if (chunk[0] === 0x05 && chunk[1] === 0x00) {
+                // Сервер выбрал метод
+                if (chunk[0] === 0x05 && chunk[1] === 0x02) {
+                    // Нужна авторизация по логину/паролю
+                    state = 'auth';
+                    const userBuffer = Buffer.from(socksUser, 'utf8');
+                    const passBuffer = Buffer.from(socksPass, 'utf8');
+                    const authPacket = Buffer.alloc(3 + userBuffer.length + passBuffer.length);
+                    authPacket[0] = 0x01; // Версия аутентификации
+                    authPacket[1] = userBuffer.length;
+                    userBuffer.copy(authPacket, 2);
+                    authPacket[2 + userBuffer.length] = passBuffer.length;
+                    passBuffer.copy(authPacket, 3 + userBuffer.length);
+                    socket.write(authPacket);
+                } else if (chunk[0] === 0x05 && chunk[1] === 0x00) {
+                    // Без авторизации — сразу CONNECT
                     state = 'connect';
-                    const hostBuffer = Buffer.from(options.host, 'utf8');
-                    const packet = Buffer.alloc(7 + hostBuffer.length);
-                    packet[0] = 0x05; packet[1] = 0x01; packet[2] = 0x00; packet[3] = 0x03;
-                    packet[4] = hostBuffer.length;
-                    hostBuffer.copy(packet, 5);
-                    packet.writeUInt16BE(options.port, 5 + hostBuffer.length);
-                    socket.write(packet);
+                    sendConnectRequest();
                 } else {
                     reject(new Error(`SOCKS5 handshake failed: ${chunk.toString('hex')}`));
+                }
+            } else if (state === 'auth') {
+                // Ответ на авторизацию
+                if (chunk[0] === 0x01 && chunk[1] === 0x00) {
+                    state = 'connect';
+                    sendConnectRequest();
+                } else {
+                    reject(new Error('SOCKS5 authentication failed'));
                 }
             } else if (state === 'connect') {
                 if (chunk[0] === 0x05 && chunk[1] === 0x00) {
                     state = 'http';
-                    const requestLines = [
-                        `${options.method} ${options.path} HTTP/1.1`,
-                        `Host: ${options.host}`,
-                        ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
-                        `Content-Length: ${Buffer.byteLength(options.body)}`,
-                        'Connection: close',
-                        '',
-                        options.body,
-                    ];
-                    socket.write(requestLines.join('\r\n'));
+                    sendHttpRequest();
                 } else {
                     reject(new Error(`SOCKS5 connect failed: ${chunk.toString('hex')}`));
                 }
@@ -196,6 +210,29 @@ function socks5TunnelRequest(options: {
                 }
             }
         });
+
+        function sendConnectRequest() {
+            const hostBuffer = Buffer.from(options.host, 'utf8');
+            const packet = Buffer.alloc(7 + hostBuffer.length);
+            packet[0] = 0x05; packet[1] = 0x01; packet[2] = 0x00; packet[3] = 0x03;
+            packet[4] = hostBuffer.length;
+            hostBuffer.copy(packet, 5);
+            packet.writeUInt16BE(options.port, 5 + hostBuffer.length);
+            socket.write(packet);
+        }
+
+        function sendHttpRequest() {
+            const requestLines = [
+                `${options.method} ${options.path} HTTP/1.1`,
+                `Host: ${options.host}`,
+                ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
+                `Content-Length: ${Buffer.byteLength(options.body)}`,
+                'Connection: close',
+                '',
+                options.body,
+            ];
+            socket.write(requestLines.join('\r\n'));
+        }
 
         socket.on('error', reject);
         socket.on('close', () => {
