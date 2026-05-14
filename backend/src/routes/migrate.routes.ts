@@ -1082,6 +1082,7 @@ class PazlApiClient {
 
     async createTransport(transportationId: number, name: string, data: any, citiesMap: Map<number, number>): Promise<any> {
         console.log(`      🚌 Создание транспорта: ${name}`);
+
         const routes: any = {
             start: {
                 info: data.transport_forth?.routes?.start?.info || null,
@@ -1137,7 +1138,44 @@ class PazlApiClient {
             }
         }
 
-        const dates = data.transport_forth?.dates?.map((d: any) => d.start_date) || [];
+        // ============================================
+        // ИСПРАВЛЕНИЕ: ПРОВЕРЯЕМ НАЛИЧИЕ ДАТ
+        // Если есть dates — используем dates, days оставляем пустым
+        // Если dates нет — генерируем days на основе duration
+        // ============================================
+
+        const rawDates = data.transport_forth?.dates;
+
+        let dates: any[] = [];
+        let days: any[] = [];
+
+        if (rawDates && Array.isArray(rawDates) && rawDates.length > 0) {
+            // Есть даты — заполняем dates, days пустой
+            dates = rawDates.map((d: any) => ({
+                id: null,
+                start_date: d.start_date || d,
+                commission_type: 1,
+                commission_sum: 0,
+                freight: 0
+            }));
+            days = [];
+            console.log(`      📅 Используем dates: ${dates.length} дат`);
+        } else {
+            // Нет дат — генерируем days на основе duration
+            const duration = parseInt(data.transport_forth?.duration || data.duration || '1', 10) || 1;
+            days = [];
+            for (let i = 1; i <= duration; i++) {
+                days.push({
+                    id: null,
+                    number: i,
+                    date_start: null,
+                    date_finish: null,
+                    can_delete: true
+                });
+            }
+            dates = [];
+            console.log(`      📅 Нет дат, генерируем days: ${days.length} дней (duration=${duration})`);
+        }
 
         const payload = {
             transportation_id: transportationId,
@@ -1146,20 +1184,14 @@ class PazlApiClient {
             duration: data.transport_forth?.duration?.toString() || "1",
             adult_price: data.transport_forth?.adult_price || "0",
             child_price: data.transport_forth?.child_price || "0",
-            start_date: data.transport_forth?.start_date || dates[0] || "2026-01-01",
-            finish_date: data.transport_forth?.finish_date || dates[dates.length - 1] || "2026-12-31",
+            start_date: data.transport_forth?.start_date || "2026-01-01",
+            finish_date: data.transport_forth?.finish_date || "2026-12-31",
             departure_type: data.transport_forth?.departure_type || 1,
             is_excursion: true,
             application_auto_confirm: false,
             auto_confirm_status: null,
-            days: [],
-            dates: dates.map((d: string) => ({
-                id: null,
-                start_date: d,
-                commission_type: 1,
-                commission_sum: 0,
-                freight: 0
-            })),
+            days: days,
+            dates: dates,
             routes: routes,
             tariffs: tariffs,
             catalog: {
