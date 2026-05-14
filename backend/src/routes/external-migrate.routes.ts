@@ -133,122 +133,83 @@ function socks5TunnelRequest(options: {
     body: string;
 }): Promise<{ status: number; data: string }> {
     return new Promise((resolve, reject) => {
-        // Параметры Amnezia SOCKS5
-        const socksHost = '5.129.231.194';
-        const socksPort = 40518;
-        const socksUser = 'proxy_user';
-        const socksPass = 'ML66rtB2Gf';
-
-        const socket = net.connect(socksPort, socksHost);
+        const socket = net.connect(1080, '5.129.231.194');
         let responseData = '';
-        let state: 'handshake' | 'auth' | 'connect' | 'http' = 'handshake';
+        let state: 'handshake' | 'connect' | 'http' = 'handshake';
         let contentLength = -1;
         let headerEnd = -1;
 
         socket.on('connect', () => {
-            // SOCKS5 handshake — с авторизацией
-            socket.write(Buffer.from([0x05, 0x02, 0x00, 0x02])); // Версия 5, 2 метода: no auth, user/pass
+            socket.write(Buffer.from([0x05, 0x01, 0x00]));
         });
 
         socket.on('data', (chunk: Buffer) => {
             if (state === 'handshake') {
-                // Сервер выбрал метод
-                if (chunk[0] === 0x05 && chunk[1] === 0x02) {
-                    // Нужна авторизация по логину/паролю
-                    state = 'auth';
-                    const userBuffer = Buffer.from(socksUser, 'utf8');
-                    const passBuffer = Buffer.from(socksPass, 'utf8');
-                    const authPacket = Buffer.alloc(3 + userBuffer.length + passBuffer.length);
-                    authPacket[0] = 0x01; // Версия аутентификации
-                    authPacket[1] = userBuffer.length;
-                    userBuffer.copy(authPacket, 2);
-                    authPacket[2 + userBuffer.length] = passBuffer.length;
-                    passBuffer.copy(authPacket, 3 + userBuffer.length);
-                    socket.write(authPacket);
-                } else if (chunk[0] === 0x05 && chunk[1] === 0x00) {
-                    // Без авторизации — сразу CONNECT
+                if (chunk[0] === 0x05 && chunk[1] === 0x00) {
                     state = 'connect';
-                    sendConnectRequest();
+                    const hostBuffer = Buffer.from(options.host, 'utf8');
+                    const packet = Buffer.alloc(7 + hostBuffer.length);
+                    packet[0] = 0x05; packet[1] = 0x01; packet[2] = 0x00; packet[3] = 0x03;
+                    packet[4] = hostBuffer.length;
+                    hostBuffer.copy(packet, 5);
+                    packet.writeUInt16BE(options.port, 5 + hostBuffer.length);
+                    socket.write(packet);
                 } else {
                     reject(new Error(`SOCKS5 handshake failed: ${chunk.toString('hex')}`));
-                }
-            } else if (state === 'auth') {
-                // Ответ на авторизацию
-                if (chunk[0] === 0x01 && chunk[1] === 0x00) {
-                    state = 'connect';
-                    sendConnectRequest();
-                } else {
-                    reject(new Error('SOCKS5 authentication failed'));
+                    socket.destroy();
                 }
             } else if (state === 'connect') {
                 if (chunk[0] === 0x05 && chunk[1] === 0x00) {
                     state = 'http';
-                    sendHttpRequest();
+                    const requestLines = [
+                        `${options.method} ${options.path} HTTP/1.1`,
+                        `Host: ${options.host}`,
+                        ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
+                        `Content-Length: ${Buffer.byteLength(options.body)}`,
+                        'Connection: close',
+                        '',
+                        options.body,
+                    ];
+                    socket.write(requestLines.join('\r\n'));
                 } else {
                     reject(new Error(`SOCKS5 connect failed: ${chunk.toString('hex')}`));
+                    socket.destroy();
                 }
             } else if (state === 'http') {
                 responseData += chunk.toString();
-
-                if (headerEnd === -1) {
-                    headerEnd = responseData.indexOf('\r\n\r\n');
-                }
-
+                if (headerEnd === -1) headerEnd = responseData.indexOf('\r\n\r\n');
                 if (headerEnd !== -1) {
                     const headers = responseData.substring(0, headerEnd);
                     const clMatch = headers.match(/Content-Length: (\d+)/i);
                     if (clMatch) contentLength = parseInt(clMatch[1]);
-
                     const bodyStart = headerEnd + 4;
                     if (contentLength > 0 && responseData.length - bodyStart >= contentLength) {
                         const statusMatch = headers.match(/HTTP\/\d\.\d (\d+)/);
-                        resolve({
-                            status: statusMatch ? parseInt(statusMatch[1]) : 200,
-                            data: responseData.substring(bodyStart)
-                        });
+                        resolve({ status: statusMatch ? parseInt(statusMatch[1]) : 200, data: responseData.substring(bodyStart) });
                     }
                 }
             }
         });
 
-        function sendConnectRequest() {
-            const hostBuffer = Buffer.from(options.host, 'utf8');
-            const packet = Buffer.alloc(7 + hostBuffer.length);
-            packet[0] = 0x05; packet[1] = 0x01; packet[2] = 0x00; packet[3] = 0x03;
-            packet[4] = hostBuffer.length;
-            hostBuffer.copy(packet, 5);
-            packet.writeUInt16BE(options.port, 5 + hostBuffer.length);
-            socket.write(packet);
-        }
+        socket.on('error', (err: Error) => {
+            reject(err);
+            socket.destroy();
+        });
 
-        function sendHttpRequest() {
-            const requestLines = [
-                `${options.method} ${options.path} HTTP/1.1`,
-                `Host: ${options.host}`,
-                ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
-                `Content-Length: ${Buffer.byteLength(options.body)}`,
-                'Connection: close',
-                '',
-                options.body,
-            ];
-            socket.write(requestLines.join('\r\n'));
-        }
-
-        socket.on('error', reject);
         socket.on('close', () => {
             if (responseData && state === 'http') {
                 const hEnd = responseData.indexOf('\r\n\r\n');
                 if (hEnd !== -1) {
                     const statusMatch = responseData.substring(0, hEnd).match(/HTTP\/\d\.\d (\d+)/);
-                    resolve({
-                        status: statusMatch ? parseInt(statusMatch[1]) : 200,
-                        data: responseData.substring(hEnd + 4)
-                    });
+                    resolve({ status: statusMatch ? parseInt(statusMatch[1]) : 200, data: responseData.substring(hEnd + 4) });
                 }
             }
         });
 
-        setTimeout(() => reject(new Error('SOCKS5 timeout')), 30000);
+        setTimeout(() => {
+            reject(new Error('SOCKS5 timeout'));
+            socket.destroy();
+        }, 30000);
     });
 }
 
@@ -299,9 +260,6 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
             body,
         });
 
-        console.log('📦 Raw response status:', result.status);
-        console.log('📦 Raw response (first 500):', result.data.substring(0, 500));
-
         if (result.status !== 200) {
             console.error('❌ Gemini API error:', result.status, result.data.substring(0, 500));
             return null;
@@ -312,18 +270,18 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
             jsonData = JSON.parse(result.data);
         } catch (e: any) {
             console.error('❌ JSON parse error:', e.message);
-            console.error('📦 Full response:', result.data);
+            console.error('📦 Raw:', result.data.substring(0, 500));
             return null;
         }
 
         const content = jsonData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
         if (!content) {
-            console.log('❌ Gemini пустой ответ, полный ответ:', JSON.stringify(jsonData).substring(0, 500));
+            console.log('❌ Gemini пустой ответ');
             return null;
         }
 
-        console.log('📦 Gemini content (first 300):', content.substring(0, 300));
+        console.log('📦 Gemini:', content.substring(0, 300));
 
         let jsonStr = content.trim();
         const m = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
