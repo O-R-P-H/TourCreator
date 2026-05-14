@@ -121,7 +121,7 @@ function sendSSE(sessionId: string, event: string, data: any) {
 }
 
 // ============================================
-// SOCKS5 TUNNEL — отправка HTTPS через SOCKS5 прокси
+// SOCKS5 TUNNEL
 // ============================================
 
 function socks5TunnelRequest(options: {
@@ -134,7 +134,6 @@ function socks5TunnelRequest(options: {
 }): Promise<{ status: number; data: string }> {
     return new Promise((resolve, reject) => {
         const socket = net.connect(1080, '127.0.0.1');
-        let buffer = Buffer.alloc(0);
         let responseData = '';
         let state: 'handshake' | 'connect' | 'http' = 'handshake';
         let contentLength = -1;
@@ -144,10 +143,9 @@ function socks5TunnelRequest(options: {
             socket.write(Buffer.from([0x05, 0x01, 0x00]));
         });
 
-        socket.on('data', (data: Buffer) => {
+        socket.on('data', (chunk: Buffer) => {
             if (state === 'handshake') {
-                // Ответ на SOCKS5 handshake
-                if (data[0] === 0x05 && data[1] === 0x00) {
+                if (chunk[0] === 0x05 && chunk[1] === 0x00) {
                     state = 'connect';
                     const hostBuffer = Buffer.from(options.host, 'utf8');
                     const packet = Buffer.alloc(7 + hostBuffer.length);
@@ -157,11 +155,10 @@ function socks5TunnelRequest(options: {
                     packet.writeUInt16BE(options.port, 5 + hostBuffer.length);
                     socket.write(packet);
                 } else {
-                    reject(new Error(`SOCKS5 handshake failed: ${data.toString('hex')}`));
+                    reject(new Error(`SOCKS5 handshake failed: ${chunk.toString('hex')}`));
                 }
             } else if (state === 'connect') {
-                // Ответ на CONNECT
-                if (data[0] === 0x05 && data[1] === 0x00) {
+                if (chunk[0] === 0x05 && chunk[1] === 0x00) {
                     state = 'http';
                     const requestLines = [
                         `${options.method} ${options.path} HTTP/1.1`,
@@ -174,22 +171,20 @@ function socks5TunnelRequest(options: {
                     ];
                     socket.write(requestLines.join('\r\n'));
                 } else {
-                    reject(new Error(`SOCKS5 connect failed: ${data.toString('hex')}`));
+                    reject(new Error(`SOCKS5 connect failed: ${chunk.toString('hex')}`));
                 }
             } else if (state === 'http') {
-                responseData += data.toString();
+                responseData += chunk.toString();
 
                 if (headerEnd === -1) {
                     headerEnd = responseData.indexOf('\r\n\r\n');
                 }
 
                 if (headerEnd !== -1) {
-                    // Парсим заголовки для Content-Length
                     const headers = responseData.substring(0, headerEnd);
                     const clMatch = headers.match(/Content-Length: (\d+)/i);
                     if (clMatch) contentLength = parseInt(clMatch[1]);
 
-                    // Проверяем получено ли всё тело
                     const bodyStart = headerEnd + 4;
                     if (contentLength > 0 && responseData.length - bodyStart >= contentLength) {
                         const statusMatch = headers.match(/HTTP\/\d\.\d (\d+)/);
@@ -204,7 +199,7 @@ function socks5TunnelRequest(options: {
 
         socket.on('error', reject);
         socket.on('close', () => {
-            if (responseData) {
+            if (responseData && state === 'http') {
                 const hEnd = responseData.indexOf('\r\n\r\n');
                 if (hEnd !== -1) {
                     const statusMatch = responseData.substring(0, hEnd).match(/HTTP\/\d\.\d (\d+)/);
@@ -221,7 +216,7 @@ function socks5TunnelRequest(options: {
 }
 
 // ============================================
-// GEMINI AI ПАРСИНГ (через SOCKS5)
+// GEMINI AI ПАРСИНГ
 // ============================================
 
 async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour | null> {
@@ -267,32 +262,31 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
             body,
         });
 
+        console.log('📦 Raw response status:', result.status);
+        console.log('📦 Raw response (first 500):', result.data.substring(0, 500));
+
         if (result.status !== 200) {
             console.error('❌ Gemini API error:', result.status, result.data.substring(0, 500));
             return null;
         }
 
-        // Логируем сырой ответ
-        console.log('📦 Raw Gemini response:', result.data.substring(0, 500));
-
-        let data: any;
+        let jsonData: any;
         try {
-            data = JSON.parse(result.data);
+            jsonData = JSON.parse(result.data);
         } catch (e: any) {
             console.error('❌ JSON parse error:', e.message);
             console.error('📦 Full response:', result.data);
             return null;
         }
 
-        const data = JSON.parse(result.data);
-        const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        const content = jsonData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
         if (!content) {
-            console.log('❌ Gemini пустой ответ');
+            console.log('❌ Gemini пустой ответ, полный ответ:', JSON.stringify(jsonData).substring(0, 500));
             return null;
         }
 
-        console.log('📦 Gemini:', content.substring(0, 300));
+        console.log('📦 Gemini content (first 300):', content.substring(0, 300));
 
         let jsonStr = content.trim();
         const m = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
