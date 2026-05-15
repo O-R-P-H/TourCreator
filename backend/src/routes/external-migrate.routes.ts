@@ -1,4 +1,5 @@
 // src/routes/external-migrate.routes.ts
+import 'dotenv/config';
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
 import { exec } from 'child_process';
