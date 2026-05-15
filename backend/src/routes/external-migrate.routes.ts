@@ -1,5 +1,4 @@
 // src/routes/external-migrate.routes.ts
-import 'dotenv/config';
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
 import { exec } from 'child_process';
@@ -121,7 +120,7 @@ function sendSSE(sessionId: string, event: string, data: any) {
 }
 
 // ============================================
-// GEMINI AI ПАРСИНГ (через curl + SOCKS5)
+// GEMINI AI ПАРСИНГ (через HTTP прокси tinyproxy)
 // ============================================
 
 async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour | null> {
@@ -148,17 +147,16 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
 Текст: ${rawText.substring(0, 20000)}`;
 
     try {
-        console.log('🤖 Отправляем запрос к Gemini через curl+SOCKS5...');
+        console.log('🤖 Отправляем запрос к Gemini через HTTP прокси...');
 
         const body = JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: { temperature: 0.1, maxOutputTokens: 8000 }
         });
 
-        // Экранируем тело для shell
         const escapedBody = body.replace(/'/g, "'\\''");
 
-        const cmd = `curl --socks5-hostname 5.129.231.194:1080 -s --max-time 120 -X POST \
+        const cmd = `/usr/bin/curl -x http://5.129.231.194:8888 -s --max-time 120 -X POST \
           -H "Content-Type: application/json" \
           -H "x-goog-api-key: ${AI_API_KEY}" \
           -d '${escapedBody}' \
@@ -190,7 +188,7 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
         const content = jsonData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
         if (!content) {
-            console.log('❌ Gemini пустой ответ, ответ:', stdout.substring(0, 500));
+            console.log('❌ Gemini пустой ответ');
             return null;
         }
 
