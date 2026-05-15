@@ -158,7 +158,7 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
         // Экранируем тело для shell
         const escapedBody = body.replace(/'/g, "'\\''");
 
-        const cmd = `curl --socks5 5.129.231.194:1080 -s --max-time 120 -X POST \
+        const cmd = `curl --socks5-hostname 5.129.231.194:1080 -s --max-time 120 -X POST \
           -H "Content-Type: application/json" \
           -H "x-goog-api-key: ${AI_API_KEY}" \
           -d '${escapedBody}' \
