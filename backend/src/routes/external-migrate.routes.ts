@@ -1,6 +1,7 @@
 // src/routes/external-migrate.routes.ts
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
+import { exec } from 'child_process';
 
 const router = Router();
 
@@ -8,8 +9,7 @@ const router = Router();
 // КОНФИГ ДЛЯ GEMINI AI
 // ============================================
 
-const AI_API_KEY = process.env.AI_API_KEY || 'AIzaSyBNB2r5vN1hbvFQetpP_TOs3ru9pb8WjOk';
-const AI_API_URL = process.env.AI_API_URL || 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent';
+const AI_API_KEY = process.env.AI_API_KEY || '';
 
 // ============================================
 // ТИПЫ
@@ -120,108 +120,7 @@ function sendSSE(sessionId: string, event: string, data: any) {
 }
 
 // ============================================
-// SOCKS5 TUNNEL (через npm пакет socks)
-// ============================================
-
-const SocksClient = require('socks').SocksClient;
-
-function socks5TunnelRequest(options: {
-    host: string;
-    port: number;
-    path: string;
-    method: string;
-    headers: Record<string, string>;
-    body: string;
-}): Promise<{ status: number; data: string }> {
-    return new Promise((resolve, reject) => {
-        const requestBody = options.body;
-
-        SocksClient.createConnection({
-            proxy: {
-                host: '5.129.231.194',
-                port: 1080,
-                type: 5,
-            },
-            command: 'connect',
-            destination: {
-                host: options.host,
-                port: options.port,
-            },
-        }, (err: any, info: any) => {
-            if (err) {
-                reject(new Error(`SOCKS5 connect failed: ${err.message}`));
-                return;
-            }
-
-            const socket = info.socket;
-            let responseData = '';
-            let contentLength = -1;
-            let headerEnd = -1;
-
-            const requestLines = [
-                `${options.method} ${options.path} HTTP/1.1`,
-                `Host: ${options.host}`,
-                ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
-                `Content-Length: ${Buffer.byteLength(requestBody)}`,
-                'Connection: close',
-                '',
-                requestBody,
-            ];
-
-            socket.write(requestLines.join('\r\n'));
-
-            socket.on('data', (chunk: Buffer) => {
-                responseData += chunk.toString();
-
-                if (headerEnd === -1) {
-                    headerEnd = responseData.indexOf('\r\n\r\n');
-                }
-
-                if (headerEnd !== -1) {
-                    const headers = responseData.substring(0, headerEnd);
-                    const clMatch = headers.match(/Content-Length: (\d+)/i);
-                    if (clMatch) contentLength = parseInt(clMatch[1]);
-
-                    const bodyStart = headerEnd + 4;
-                    if (contentLength > 0 && responseData.length - bodyStart >= contentLength) {
-                        const statusMatch = headers.match(/HTTP\/\d\.\d (\d+)/);
-                        resolve({
-                            status: statusMatch ? parseInt(statusMatch[1]) : 200,
-                            data: responseData.substring(bodyStart)
-                        });
-                        socket.destroy();
-                    }
-                }
-            });
-
-            socket.on('error', (e: Error) => {
-                reject(e);
-                socket.destroy();
-            });
-
-            socket.on('close', () => {
-                if (responseData) {
-                    const hEnd = responseData.indexOf('\r\n\r\n');
-                    if (hEnd !== -1) {
-                        const statusMatch = responseData.substring(0, hEnd).match(/HTTP\/\d\.\d (\d+)/);
-                        resolve({
-                            status: statusMatch ? parseInt(statusMatch[1]) : 200,
-                            data: responseData.substring(hEnd + 4)
-                        });
-                    }
-                }
-            });
-
-            setTimeout(() => {
-                reject(new Error('SOCKS5 timeout'));
-                socket.destroy();
-            }, 30000);
-        });
-    });
-}
-
-// ============================================
-// GEMINI AI ПАРСИНГ
+// GEMINI AI ПАРСИНГ (через curl + SOCKS5)
 // ============================================
 
 async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour | null> {
@@ -248,47 +147,53 @@ async function parseWithAI(rawText: string, url: string): Promise<AIParsedTour |
 Текст: ${rawText.substring(0, 20000)}`;
 
     try {
-        console.log('🤖 Отправляем запрос к Gemini через SOCKS5...');
+        console.log('🤖 Отправляем запрос к Gemini через curl+SOCKS5...');
 
         const body = JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: { temperature: 0.1, maxOutputTokens: 8000 }
         });
 
-        const result = await socks5TunnelRequest({
-            host: 'generativelanguage.googleapis.com',
-            port: 443,
-            path: `/v1beta/models/gemini-3.1-flash-lite:generateContent`,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-goog-api-key': AI_API_KEY,
-            },
-            body,
+        // Экранируем тело для shell
+        const escapedBody = body.replace(/'/g, "'\\''");
+
+        const cmd = `curl --socks5 5.129.231.194:1080 -s --max-time 120 -X POST \
+          -H "Content-Type: application/json" \
+          -H "x-goog-api-key: ${AI_API_KEY}" \
+          -d '${escapedBody}' \
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"`;
+
+        const stdout = await new Promise<string>((resolve, reject) => {
+            exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {
+                if (error) {
+                    console.error('❌ curl error:', error.message);
+                    reject(error);
+                } else {
+                    resolve(stdout);
+                }
+            });
         });
 
-        if (result.status !== 200) {
-            console.error('❌ Gemini API error:', result.status, result.data.substring(0, 500));
+        if (!stdout) {
+            console.log('❌ Пустой ответ от Gemini');
             return null;
         }
 
-        let jsonData: any;
-        try {
-            jsonData = JSON.parse(result.data);
-        } catch (e: any) {
-            console.error('❌ JSON parse error:', e.message);
-            console.error('📦 Raw:', result.data.substring(0, 500));
+        const jsonData = JSON.parse(stdout);
+
+        if (jsonData.error) {
+            console.error('❌ Gemini API error:', jsonData.error.message);
             return null;
         }
 
         const content = jsonData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
         if (!content) {
-            console.log('❌ Gemini пустой ответ');
+            console.log('❌ Gemini пустой ответ, ответ:', stdout.substring(0, 500));
             return null;
         }
 
-        console.log('📦 Gemini:', content.substring(0, 300));
+        console.log('📦 Gemini ответ (первые 300):', content.substring(0, 300));
 
         let jsonStr = content.trim();
         const m = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
