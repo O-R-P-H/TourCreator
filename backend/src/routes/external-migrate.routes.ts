@@ -1,7 +1,6 @@
 // src/routes/external-migrate.routes.ts
 import { Router, Request, Response } from 'express';
 import { chromium } from 'playwright';
-import * as net from 'net';
 
 const router = Router();
 
@@ -121,8 +120,10 @@ function sendSSE(sessionId: string, event: string, data: any) {
 }
 
 // ============================================
-// SOCKS5 TUNNEL
+// SOCKS5 TUNNEL (через npm пакет socks)
 // ============================================
+
+const SocksClient = require('socks').SocksClient;
 
 function socks5TunnelRequest(options: {
     host: string;
@@ -133,83 +134,89 @@ function socks5TunnelRequest(options: {
     body: string;
 }): Promise<{ status: number; data: string }> {
     return new Promise((resolve, reject) => {
-        const socket = net.connect(1080, '5.129.231.194');
-        let responseData = '';
-        let state: 'handshake' | 'connect' | 'http' = 'handshake';
-        let contentLength = -1;
-        let headerEnd = -1;
+        const requestBody = options.body;
 
-        socket.on('connect', () => {
-            socket.write(Buffer.from([0x05, 0x01, 0x00]));
-        });
+        SocksClient.createConnection({
+            proxy: {
+                host: '5.129.231.194',
+                port: 1080,
+                type: 5,
+            },
+            command: 'connect',
+            destination: {
+                host: options.host,
+                port: options.port,
+            },
+        }, (err: any, info: any) => {
+            if (err) {
+                reject(new Error(`SOCKS5 connect failed: ${err.message}`));
+                return;
+            }
 
-        socket.on('data', (chunk: Buffer) => {
-            if (state === 'handshake') {
-                if (chunk[0] === 0x05 && chunk[1] === 0x00) {
-                    state = 'connect';
-                    const hostBuffer = Buffer.from(options.host, 'utf8');
-                    const packet = Buffer.alloc(7 + hostBuffer.length);
-                    packet[0] = 0x05; packet[1] = 0x01; packet[2] = 0x00; packet[3] = 0x03;
-                    packet[4] = hostBuffer.length;
-                    hostBuffer.copy(packet, 5);
-                    packet.writeUInt16BE(options.port, 5 + hostBuffer.length);
-                    socket.write(packet);
-                } else {
-                    reject(new Error(`SOCKS5 handshake failed: ${chunk.toString('hex')}`));
-                    socket.destroy();
-                }
-            } else if (state === 'connect') {
-                if (chunk[0] === 0x05 && chunk[1] === 0x00) {
-                    state = 'http';
-                    const requestLines = [
-                        `${options.method} ${options.path} HTTP/1.1`,
-                        `Host: ${options.host}`,
-                        ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
-                        `Content-Length: ${Buffer.byteLength(options.body)}`,
-                        'Connection: close',
-                        '',
-                        options.body,
-                    ];
-                    socket.write(requestLines.join('\r\n'));
-                } else {
-                    reject(new Error(`SOCKS5 connect failed: ${chunk.toString('hex')}`));
-                    socket.destroy();
-                }
-            } else if (state === 'http') {
+            const socket = info.socket;
+            let responseData = '';
+            let contentLength = -1;
+            let headerEnd = -1;
+
+            const requestLines = [
+                `${options.method} ${options.path} HTTP/1.1`,
+                `Host: ${options.host}`,
+                ...Object.entries(options.headers).map(([k, v]) => `${k}: ${v}`),
+                `Content-Length: ${Buffer.byteLength(requestBody)}`,
+                'Connection: close',
+                '',
+                requestBody,
+            ];
+
+            socket.write(requestLines.join('\r\n'));
+
+            socket.on('data', (chunk: Buffer) => {
                 responseData += chunk.toString();
-                if (headerEnd === -1) headerEnd = responseData.indexOf('\r\n\r\n');
+
+                if (headerEnd === -1) {
+                    headerEnd = responseData.indexOf('\r\n\r\n');
+                }
+
                 if (headerEnd !== -1) {
                     const headers = responseData.substring(0, headerEnd);
                     const clMatch = headers.match(/Content-Length: (\d+)/i);
                     if (clMatch) contentLength = parseInt(clMatch[1]);
+
                     const bodyStart = headerEnd + 4;
                     if (contentLength > 0 && responseData.length - bodyStart >= contentLength) {
                         const statusMatch = headers.match(/HTTP\/\d\.\d (\d+)/);
-                        resolve({ status: statusMatch ? parseInt(statusMatch[1]) : 200, data: responseData.substring(bodyStart) });
+                        resolve({
+                            status: statusMatch ? parseInt(statusMatch[1]) : 200,
+                            data: responseData.substring(bodyStart)
+                        });
+                        socket.destroy();
                     }
                 }
-            }
-        });
+            });
 
-        socket.on('error', (err: Error) => {
-            reject(err);
-            socket.destroy();
-        });
+            socket.on('error', (e: Error) => {
+                reject(e);
+                socket.destroy();
+            });
 
-        socket.on('close', () => {
-            if (responseData && state === 'http') {
-                const hEnd = responseData.indexOf('\r\n\r\n');
-                if (hEnd !== -1) {
-                    const statusMatch = responseData.substring(0, hEnd).match(/HTTP\/\d\.\d (\d+)/);
-                    resolve({ status: statusMatch ? parseInt(statusMatch[1]) : 200, data: responseData.substring(hEnd + 4) });
+            socket.on('close', () => {
+                if (responseData) {
+                    const hEnd = responseData.indexOf('\r\n\r\n');
+                    if (hEnd !== -1) {
+                        const statusMatch = responseData.substring(0, hEnd).match(/HTTP\/\d\.\d (\d+)/);
+                        resolve({
+                            status: statusMatch ? parseInt(statusMatch[1]) : 200,
+                            data: responseData.substring(hEnd + 4)
+                        });
+                    }
                 }
-            }
-        });
+            });
 
-        setTimeout(() => {
-            reject(new Error('SOCKS5 timeout'));
-            socket.destroy();
-        }, 30000);
+            setTimeout(() => {
+                reject(new Error('SOCKS5 timeout'));
+                socket.destroy();
+            }, 30000);
+        });
     });
 }
 
